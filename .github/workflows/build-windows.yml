@@ -1,0 +1,72 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Build Tauri app
+        run: cargo tauri build --target x86_64-pc-windows-msvc
+        working-directory: src-tauri
+
+      - name: Upload Windows MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi-x64
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+      - name: Upload Windows NSIS
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-x64
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+      - name: Upload Windows Portable
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-portable-x64
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/archivevault.exe

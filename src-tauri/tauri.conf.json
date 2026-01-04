@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0-rc",
+  "productName": "ArchiveVault",
+  "version": "0.1.0",
+  "identifier": "com.ganily.archivevault",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../frontend/dist",
+    "beforeDevCommand": "node -e \"const fs=require('fs');const cp=require('child_process');const dirs=['frontend','../frontend','.'];let dir=null;for(const d of dirs){if(fs.existsSync(d+'/package.json')){dir=d;break;}}if(!dir){console.error('找不到 frontend/package.json（请在仓库根或 src-tauri 目录启动）');process.exit(1);}const npm=process.platform==='win32'?'npm.cmd':'npm';const r=cp.spawnSync(npm,['--prefix',dir,'run','dev'],{stdio:'inherit'});process.exit(r.status??1);\"",
+    "beforeBuildCommand": "node -e \"const fs=require('fs');const cp=require('child_process');const dirs=['frontend','../frontend','.'];let dir=null;for(const d of dirs){if(fs.existsSync(d+'/package.json')){dir=d;break;}}if(!dir){console.error('找不到 frontend/package.json（请在仓库根或 src-tauri 目录启动）');process.exit(1);}const npm=process.platform==='win32'?'npm.cmd':'npm';const r=cp.spawnSync(npm,['--prefix',dir,'run','build'],{stdio:'inherit'});process.exit(r.status??1);\""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "ArchiveVault",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Get version
+        run: echo "PACKAGE_VERSION=$(node -p \"require('./src-tauri/tauri.conf.json').version\")" >> $GITHUB_ENV
+
+      - name: Create release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tagName = process.env.GITHUB_REF_NAME || context.ref.replace('refs/tags/', '');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tagName,
+              name: `ArchiveVault ${tagName}`,
+              body: 'Take a look at the assets to download and install this app.',
+              draft: true,
+              prerelease: false
+            })
+            return data.id
+
+  build-tauri:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'windows-latest'
+            args: '--target x86_64-pc-windows-msvc'
+            target: 'x86_64-pc-windows-msvc'
+          - platform: 'ubuntu-22.04'
+            args: '--target x86_64-unknown-linux-gnu'
+            target: 'x86_64-unknown-linux-gnu'
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+            target: 'x86_64-apple-darwin'
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+            target: 'aarch64-apple-darwin'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Build Tauri app
+        run: cargo tauri build ${{ matrix.args }}
+        working-directory: src-tauri
+
+      - name: Upload release assets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const releaseId = ${{ needs.create-release.outputs.release_id }};
+            const target = '${{ matrix.target }}';
+            const platform = '${{ matrix.platform }}';
+            
+            let bundlePath;
+            let assetPaths = [];
+            
+            if (platform.includes('windows')) {
+              bundlePath = `src-tauri/target/${target}/release/bundle`;
+              
+              // MSI installer
+              const msiFiles = fs.readdirSync(path.join(bundlePath, 'msi')).filter(f => f.endsWith('.msi'));
+              if (msiFiles.length > 0) {
+                assetPaths.push({
+                  path: path.join(bundlePath, 'msi', msiFiles[0]),
+                  name: `ArchiveVault_${target}.msi`
+                });
+              }
+              
+              // NSIS installer
+              const nsisFiles = fs.readdirSync(path.join(bundlePath, 'nsis')).filter(f => f.endsWith('.exe'));
+              if (nsisFiles.length > 0) {
+                assetPaths.push({
+                  path: path.join(bundlePath, 'nsis', nsisFiles[0]),
+                  name: `ArchiveVault_${target}_setup.exe`
+                });
+              }
+            } else if (platform.includes('ubuntu')) {
+              bundlePath = `src-tauri/target/${target}/release/bundle`;
+              
+              // AppImage
+              const appImageFiles = fs.readdirSync(path.join(bundlePath, 'appimage')).filter(f => f.endsWith('.AppImage'));
+              if (appImageFiles.length > 0) {
+                assetPaths.push({
+                  path: path.join(bundlePath, 'appimage', appImageFiles[0]),
+                  name: `ArchiveVault_${target}.AppImage`
+                });
+              }
+              
+              // Deb package
+              const debFiles = fs.readdirSync(path.join(bundlePath, 'deb')).filter(f => f.endsWith('.deb'));
+              if (debFiles.length > 0) {
+                assetPaths.push({
+                  path: path.join(bundlePath, 'deb', debFiles[0]),
+                  name: `ArchiveVault_${target}.deb`
+                });
+              }
+            } else if (platform.includes('macos')) {
+              bundlePath = `src-tauri/target/${target}/release/bundle`;
+              
+              // DMG
+              const dmgFiles = fs.readdirSync(path.join(bundlePath, 'dmg')).filter(f => f.endsWith('.dmg'));
+              if (dmgFiles.length > 0) {
+                assetPaths.push({
+                  path: path.join(bundlePath, 'dmg', dmgFiles[0]),
+                  name: `ArchiveVault_${target}.dmg`
+                });
+              }
+            }
+            
+            for (const asset of assetPaths) {
+              if (fs.existsSync(asset.path)) {
+                console.log(`Uploading ${asset.name}...`);
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: releaseId,
+                  name: asset.name,
+                  data: fs.readFileSync(asset.path)
+                });
+              }
+            }
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: [create-release, build-tauri]
+    
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false,
+              prerelease: false
+            })

@@ -1,0 +1,78 @@
+name: Windows Build Only
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Build Tauri app
+        run: cargo tauri build --target x86_64-pc-windows-msvc
+        working-directory: src-tauri
+
+      - name: List build outputs
+        run: |
+          echo "=== Build outputs ==="
+          dir src-tauri\target\x86_64-pc-windows-msvc\release\bundle /s
+        shell: cmd
+
+      - name: Upload Windows MSI Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArchiveVault-Windows-MSI
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: warn
+
+      - name: Upload Windows NSIS Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArchiveVault-Windows-NSIS
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+
+      - name: Upload Windows Portable Executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArchiveVault-Windows-Portable
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/archivevault.exe
+          if-no-files-found: warn

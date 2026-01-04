@@ -1,0 +1,122 @@
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# nyc / coverage
+.nyc_output
+coverage/
+
+# Dependency directories
+jspm_packages/
+
+# Node / npm / pnpm / yarn
+.npm
+.pnpm-store/
+.yarn/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variables file
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Temporary folders
+tmp/
+temp/
+
+# Build outputs
+dist/
+build/
+
+# Cache
+.cache/
+.vite/
+.eslintcache
+
+# Local development
+.local/
+
+# Test outputs
+test-results/
+
+# Backup files
+*.bak
+*.backup
+
+# Archive files (for testing / avoid accidental commits)
+*.zip
+*.rar
+*.7z
+*.tar.gz
+
+# Generated files
+*.generated.*
+.ignore/
+
+# Rust / Cargo
+**/target/
+**/*.rs.bk
+
+# Tauri build outputs (extra safety)
+src-tauri/target/
+
+
+# Frontend deps/build
+frontend/node_modules/
+frontend/dist/
+
+# ArchiveVault library/runtime data (avoid committing local database/cache)
+/db.sqlite
+/db.sqlite3
+/*.sqlite
+/*.sqlite3
+/*.db
+/store/
+/cache/
+/index/
+
+# OS-specific generated bundles (extra safety)
+*.dmg
+*.AppImage
+*.deb
+*.msi
+*.exe
