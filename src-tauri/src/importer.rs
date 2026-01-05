@@ -86,21 +86,44 @@ fn collect_zip_files(dir: &Path, out: &mut Vec<String>, limit: usize) -> Result<
 }
 
 #[tauri::command]
-pub fn import_zips(
+pub async fn import_zips(
     app: tauri::AppHandle,
     state: State<'_, LibraryRootState>,
     paths: Vec<String>,
 ) -> Result<ImportResult, String> {
-    import_zips_impl(&app, &state, paths).map_err(db::err_to_string)
+    // 导入是重CPU/IO的同步任务：放到阻塞线程池，避免卡住主线程导致 UI 无响应/Windows 崩溃
+    let root = resolve_library_root(&app, &state).map_err(db::err_to_string)?;
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || import_zips_impl(&app2, &root, paths))
+        .await
+        .map_err(|e| db::err_to_string(anyhow!(e).context("导入线程失败")))?
+        .map_err(db::err_to_string)
+}
+
+const IMPORT_STEPS_PER_ZIP: usize = 6;
+
+fn emit_import_progress(
+    app: &tauri::AppHandle,
+    zip_idx: usize,
+    zip_total: usize,
+    local_step: usize,
+    step: &str,
+    message: &str,
+) {
+    // 让前端进度条在整个“批量导入”期间持续可见
+    let total = zip_total.saturating_mul(IMPORT_STEPS_PER_ZIP).max(1);
+    let current = zip_idx
+        .saturating_mul(IMPORT_STEPS_PER_ZIP)
+        .saturating_add(local_step.min(IMPORT_STEPS_PER_ZIP.saturating_sub(1)));
+    progress::emit(app, progress::ProgressEvent::new("import", current, total, step, message));
 }
 
 fn import_zips_impl(
     app: &tauri::AppHandle,
-    state: &LibraryRootState,
+    root: &Path,
     paths: Vec<String>,
 ) -> Result<ImportResult> {
-    let root = resolve_library_root(app, state)?;
-    db::init_db(app, &root)?;
+    db::init_db(app, root)?;
     let mut conn = Connection::open(root.join("db.sqlite"))?;
 
     let mut imported = 0usize;
@@ -109,23 +132,11 @@ fn import_zips_impl(
     let mut archives = Vec::new();
 
     let total = paths.len();
-    progress::emit(
-        app,
-        progress::ProgressEvent::new("import", 0, total, "开始", "准备导入ZIP"),
-    );
+    progress::emit(app, progress::ProgressEvent::new("import", 0, total.max(1), "开始", "准备导入ZIP"));
 
     for (idx, p) in paths.into_iter().enumerate() {
-        progress::emit(
-            app,
-            progress::ProgressEvent::new(
-                "import",
-                idx,
-                total,
-                "处理ZIP",
-                &format!("正在处理: {}", p),
-            ),
-        );
-        match import_one_zip(app, &mut conn, &root, Path::new(&p)) {
+        emit_import_progress(app, idx, total, 0, "处理ZIP", &format!("正在处理: {}", p));
+        match import_one_zip(app, &mut conn, root, Path::new(&p), idx, total) {
             Ok(row) => {
                 imported += 1;
                 archives.push(row);
@@ -134,18 +145,25 @@ fn import_zips_impl(
                 // 若是重复跳过
                 if e.to_string().contains("__SKIP__") {
                     skipped += 1;
+                    emit_import_progress(app, idx, total, IMPORT_STEPS_PER_ZIP - 1, "跳过", "指纹已存在，跳过该ZIP");
                     continue;
                 }
                 failed += 1;
+                emit_import_progress(app, idx, total, IMPORT_STEPS_PER_ZIP - 1, "失败", "导入失败（已记录错误）");
                 eprintln!("导入失败: {p}: {e:#}");
             }
         }
     }
 
+    // 用同一口径的 total/current 标记完成，保证前端进度条能走满
+    let total_steps = total.saturating_mul(IMPORT_STEPS_PER_ZIP).max(1);
     progress::emit(
         app,
-        progress::ProgressEvent::complete(
+        progress::ProgressEvent::new(
             "import",
+            total_steps,
+            total_steps,
+            "完成",
             &format!("导入完成：导入{imported} 跳过{skipped} 失败{failed}"),
         ),
     );
@@ -350,6 +368,8 @@ fn import_one_zip(
     conn: &mut Connection,
     root: &Path,
     source_path: &Path,
+    zip_idx: usize,
+    zip_total: usize,
 ) -> Result<db::ArchiveRow> {
     let original_name = source_path
         .file_name()
@@ -359,10 +379,7 @@ fn import_one_zip(
     let imported_at = now_ts();
     let zip_date = parse_zip_date_from_name(&original_name, imported_at);
 
-    progress::emit(
-        app,
-        progress::ProgressEvent::new("import", 0, 1, "计算指纹", &original_name),
-    );
+    emit_import_progress(app, zip_idx, zip_total, 1, "计算指纹", &original_name);
     let sha256 = sha256_file(source_path)?;
     let exists: Option<String> = conn
         .query_row(
@@ -380,18 +397,12 @@ fn import_one_zip(
     let stored_abs = root.join(&stored_rel);
 
     let run = (|| -> Result<db::ArchiveRow> {
-        progress::emit(
-            app,
-            progress::ProgressEvent::new("import", 0, 1, "复制ZIP", &stored_rel),
-        );
+        emit_import_progress(app, zip_idx, zip_total, 2, "复制ZIP", &stored_rel);
         fs::create_dir_all(stored_abs.parent().unwrap())?;
         fs::copy(source_path, &stored_abs)?;
 
         // 先写入 archives（processing）
-        progress::emit(
-            app,
-            progress::ProgressEvent::new("import", 0, 1, "写入数据库", "archives"),
-        );
+        emit_import_progress(app, zip_idx, zip_total, 2, "写入数据库", "archives");
         conn.execute(
             "INSERT INTO archives(archive_id,sha256,original_name,source_path,stored_path,zip_date,imported_at,status,error)
              VALUES(?,?,?,?,?,?,?,?,NULL)",
@@ -407,19 +418,13 @@ fn import_one_zip(
             ],
         )?;
 
-        progress::emit(
-            app,
-            progress::ProgressEvent::new("import", 0, 1, "扫描ZIP", "识别主docx"),
-        );
+        emit_import_progress(app, zip_idx, zip_total, 3, "扫描ZIP", "识别主docx");
         let mut zip = ZipArchive::new(fs::File::open(&stored_abs)?)?;
         let main_docx_name = identify_main_docx(&original_name, &mut zip)?;
         let main_docx_bytes = read_zip_entry_bytes(&mut zip, &main_docx_name)
             .with_context(|| format!("读取主docx失败: {main_docx_name}"))?;
 
-        progress::emit(
-            app,
-            progress::ProgressEvent::new("import", 0, 1, "解析主docx", "抽取字段与段落"),
-        );
+        emit_import_progress(app, zip_idx, zip_total, 4, "解析主docx", "抽取字段与段落");
         let parsed = docx::parse_main_docx(&main_docx_bytes)?;
 
         // 写 main_doc + blocks + FTS + attachments 采用一个事务，避免中途失败留下半数据
@@ -469,10 +474,7 @@ fn import_one_zip(
         }
 
         // 附件枚举（主 ZIP + 一层子 ZIP）
-        progress::emit(
-            app,
-            progress::ProgressEvent::new("import", 0, 1, "枚举附件", "主ZIP/子ZIP"),
-        );
+        emit_import_progress(app, zip_idx, zip_total, 5, "枚举附件", "主ZIP/子ZIP");
         let attachments = enumerate_attachments(&stored_abs, &main_docx_name)?;
         write_attachments_tx(&tx, &archive_id, attachments)?;
 
@@ -482,10 +484,7 @@ fn import_one_zip(
         )?;
         tx.commit()?;
 
-        progress::emit(
-            app,
-            progress::ProgressEvent::new("import", 1, 1, "完成", &original_name),
-        );
+        emit_import_progress(app, zip_idx, zip_total, 5, "完成", &original_name);
         Ok(db::ArchiveRow {
             archive_id: archive_id.clone(),
             original_name: original_name.clone(),

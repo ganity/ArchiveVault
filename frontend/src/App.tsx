@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import SearchPage from "./pages/SearchPage";
 import SettingsPage from "./pages/SettingsPage";
 import { invoke, listen } from "./tauri";
@@ -18,7 +18,7 @@ type ProgressEvent = {
 export default function App() {
   const [page, setPage] = useState<Page>("search");
   const [ready, setReady] = useState(false);
-  const isTauri = useMemo(() => Boolean((window as any).__TAURI__), []);
+  const [isTauri, setIsTauri] = useState(false);
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [searchRefreshToken, setSearchRefreshToken] = useState(0);
   const [globalMsg, setGlobalMsg] = useState<{ text: string, type: 'info' | 'error' } | null>(null);
@@ -40,8 +40,23 @@ export default function App() {
   } | null>(null);
 
   useEffect(() => {
-    // Tauri 注入可能略有延迟
+    // Tauri 注入可能略有延迟（尤其是 Windows）；isTauri 不能只在首帧判断
     setReady(true);
+    let cancelled = false;
+    const check = () => {
+      if (cancelled) return;
+      const ok = Boolean(
+        (window as any).__TAURI__ ||
+        (window as any).__TAURI_INTERNALS__ ||
+        typeof (window as any).__TAURI_INVOKE__ === "function"
+      );
+      setIsTauri(ok);
+      if (!ok) setTimeout(check, 50);
+    };
+    check();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
