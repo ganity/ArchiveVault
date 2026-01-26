@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import SearchPage from "./pages/SearchPage";
 import SettingsPage from "./pages/SettingsPage";
+import TopicsPage from "./pages/TopicsPage";
 import { invoke, listen } from "./tauri";
 import ArchiveDetail from "./pages/components/ArchiveDetail";
 
-type Page = "search" | "detail" | "settings";
+type Page = "search" | "topics" | "detail" | "settings";
 
 type ProgressEvent = {
   operation: string;
@@ -38,6 +39,7 @@ export default function App() {
     | { kind: "annotation"; annotation_id: string }
     | null;
   } | null>(null);
+  const [previousPage, setPreviousPage] = useState<Page>("search");
 
   useEffect(() => {
     // Tauri 注入可能略有延迟（尤其是 Windows）；isTauri 不能只在首帧判断
@@ -142,10 +144,10 @@ export default function App() {
           {page === "detail" ? (
             <button
               className="primary"
-              onClick={() => setPage("search")}
+              onClick={() => setPage(previousPage)}
               style={{ borderRadius: 8, height: 32, padding: "0 12px", fontSize: 13 }}
             >
-              ← 返回搜索
+              ← 返回
             </button>
           ) : (
             <>
@@ -156,6 +158,14 @@ export default function App() {
                 style={{ border: "none", background: page === "search" ? "var(--primary-color)" : "transparent", color: page === "search" ? "white" : "var(--text-muted)", borderRadius: 7, height: 32, padding: "0 16px", fontSize: 13, fontWeight: 500 }}
               >
                 搜索
+              </button>
+              <button
+                className={page === "topics" ? "primary" : ""}
+                onClick={() => setPage("topics")}
+                disabled={page === "topics"}
+                style={{ border: "none", background: page === "topics" ? "var(--primary-color)" : "transparent", color: page === "topics" ? "white" : "var(--text-muted)", borderRadius: 7, height: 32, padding: "0 16px", fontSize: 13, fontWeight: 500 }}
+              >
+                目录
               </button>
               <button
                 className={page === "settings" ? "primary" : ""}
@@ -241,11 +251,22 @@ export default function App() {
         <div style={{ display: page === "settings" ? "block" : "none", height: "100%" }}>
           <SettingsPage />
         </div>
-        <div style={{ display: page === "settings" ? "none" : page === "search" ? "block" : "none", height: "100%" }}>
+        <div style={{ display: page === "settings" || page === "topics" ? "none" : page === "search" ? "block" : "none", height: "100%" }}>
           <SearchPage
             refreshToken={searchRefreshToken}
             onOpenArchive={(archiveId, open) => {
               setDetailCtx({ archiveId, open });
+              setPreviousPage("search");
+              setPage("detail");
+            }}
+          />
+        </div>
+        <div style={{ display: page === "settings" || page === "search" ? "none" : page === "topics" ? "block" : "none", height: "100%" }}>
+          <TopicsPage
+            refreshToken={searchRefreshToken}
+            onOpenArchive={(archiveId) => {
+              setDetailCtx({ archiveId, open: { kind: "docx" } });
+              setPreviousPage("topics");
               setPage("detail");
             }}
           />
@@ -257,7 +278,7 @@ export default function App() {
               open={detailCtx.open}
               onArchiveDeleted={async () => {
                 setDetailCtx(null);
-                setPage("search");
+                setPage(previousPage);
                 setSearchRefreshToken((t) => t + 1);
               }}
             />

@@ -34,11 +34,9 @@ pub fn init_db(app: &tauri::AppHandle, root: &Path) -> Result<()> {
     ensure_annotations_fts_synced(&conn)?;
     // 修复/写入 meta
     let existing: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key='library_root'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT value FROM meta WHERE key='library_root'", [], |r| {
+            r.get(0)
+        })
         .optional()?;
     if existing.is_none() {
         write_meta(
@@ -205,7 +203,9 @@ pub fn read_meta(_app: &tauri::AppHandle, root: &Path) -> Result<MetaRecord> {
     let conn = open_conn_at(root)?;
     apply_migrations(&conn)?;
     let library_root: String = conn
-        .query_row("SELECT value FROM meta WHERE key='library_root'", [], |r| r.get(0))
+        .query_row("SELECT value FROM meta WHERE key='library_root'", [], |r| {
+            r.get(0)
+        })
         .context("meta 缺少 library_root")?;
     let tz: String = conn
         .query_row("SELECT value FROM meta WHERE key='tz'", [], |r| r.get(0))
@@ -240,7 +240,9 @@ pub fn validate_store_paths_at(root: &Path) -> Result<()> {
         let (archive_id, stored_path) = row?;
         let p = root.join(&stored_path);
         if !p.exists() {
-            return Err(anyhow!("缺少ZIP文件: archive_id={archive_id} path={stored_path}"));
+            return Err(anyhow!(
+                "缺少ZIP文件: archive_id={archive_id} path={stored_path}"
+            ));
         }
     }
     Ok(())
@@ -314,6 +316,26 @@ pub struct ArchiveListItem {
     pub status: String,
     pub instruction_no: Option<String>,
     pub title: Option<String>,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicItem {
+    pub title: String,
+    pub archive_count: i64,
+    pub latest_date: i64,
+    pub earliest_date: i64,
+    pub archives: Vec<ArchiveListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListTopicsRequest {
+    pub date_from: Option<i64>,
+    pub date_to: Option<i64>,
+    pub search_query: Option<String>,
+    pub sort_desc: Option<bool>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[tauri::command]
@@ -337,12 +359,16 @@ pub fn list_archives(
 
     if req.date_from.is_some() || req.date_to.is_some() {
         where_sql.push_str(" WHERE a.zip_date BETWEEN ? AND ? ");
-        params_vec.push(rusqlite::types::Value::from(req.date_from.unwrap_or(i64::MIN)));
-        params_vec.push(rusqlite::types::Value::from(req.date_to.unwrap_or(i64::MAX)));
+        params_vec.push(rusqlite::types::Value::from(
+            req.date_from.unwrap_or(i64::MIN),
+        ));
+        params_vec.push(rusqlite::types::Value::from(
+            req.date_to.unwrap_or(i64::MAX),
+        ));
     }
 
     let sql = format!(
-        "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title
+        "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title, m.content
          FROM archives a
          LEFT JOIN main_doc m ON m.archive_id=a.archive_id
          {where_sql}
@@ -352,9 +378,7 @@ pub fn list_archives(
     params_vec.push(rusqlite::types::Value::from(limit));
     params_vec.push(rusqlite::types::Value::from(offset));
 
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| err_to_string(anyhow!(e)))?;
+    let mut stmt = conn.prepare(&sql).map_err(|e| err_to_string(anyhow!(e)))?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params_vec), |r| {
             Ok(ArchiveListItem {
@@ -365,6 +389,7 @@ pub fn list_archives(
                 status: r.get(4)?,
                 instruction_no: r.get(5).ok(),
                 title: r.get(6).ok(),
+                content: r.get(7).ok(),
             })
         })
         .map_err(|e| err_to_string(anyhow!(e)))?;
@@ -375,6 +400,130 @@ pub fn list_archives(
     Ok(out)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeywordSuggestion {
+    pub keyword: String,
+    pub count: i64,
+}
+
+#[tauri::command]
+pub fn get_popular_keywords(
+    app: tauri::AppHandle,
+    state: State<'_, LibraryRootState>,
+    limit: Option<usize>,
+) -> Result<Vec<KeywordSuggestion>, String> {
+    let (_root, conn) = open_conn(&app, &state).map_err(err_to_string)?;
+    let limit = limit.unwrap_or(20).min(100);
+
+    // 从 main_doc 提取标题和内容中的高频词
+    // 使用简单的中文分词方法：提取2-4个字符的连续中文字符
+    let sql = r#"
+        WITH keywords AS (
+            SELECT TRIM(value) as keyword
+            FROM (
+                SELECT unnest(regexp_split_to_array(title, '([^\u{4e00}-\u{9fa5}]+|[\s、。！？；：，()\[\]]+)')) as value
+                FROM main_doc
+                WHERE title IS NOT NULL AND title != ''
+
+                UNION ALL
+
+                SELECT unnest(regexp_split_to_array(content, '([^\u{4e00}-\u{9fa5}]+|[\s、。！？；：，()\[\]]+)')) as value
+                FROM main_doc
+                WHERE content IS NOT NULL AND content != ''
+            )
+            WHERE length(value) BETWEEN 2 AND 4
+        )
+        SELECT keyword, COUNT(*) as count
+        FROM keywords
+        WHERE keyword != ''
+        GROUP BY keyword
+        ORDER BY count DESC
+        LIMIT ?
+    "#;
+
+    let mut stmt = conn.prepare(sql).map_err(|e| err_to_string(anyhow!(e)))?;
+    let rows = stmt
+        .query_map([limit as i64], |r| {
+            Ok(KeywordSuggestion {
+                keyword: r.get(0)?,
+                count: r.get(1)?,
+            })
+        })
+        .map_err(|e| err_to_string(anyhow!(e)))?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| err_to_string(anyhow!(e)))?);
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn update_archive_title(
+    app: tauri::AppHandle,
+    state: State<'_, LibraryRootState>,
+    archive_id: String,
+    new_title: String,
+) -> Result<(), String> {
+    let (_root, mut conn) = open_conn(&app, &state).map_err(err_to_string)?;
+
+    let tx = conn.transaction().map_err(|e| err_to_string(anyhow!(e)))?;
+
+    // 检查档案是否存在
+    let exists: bool = tx
+        .query_row(
+            "SELECT COUNT(1) FROM archives WHERE archive_id=?",
+            [&archive_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| err_to_string(anyhow!(e).context("检查档案失败")))?;
+
+    if !exists {
+        return Err(format!("档案 {} 不存在", archive_id));
+    }
+
+    // 检查 main_doc 记录是否存在
+    let has_main_doc: bool = tx
+        .query_row(
+            "SELECT COUNT(1) FROM main_doc WHERE archive_id=?",
+            [&archive_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| err_to_string(anyhow!(e).context("检查 main_doc 失败")))?;
+
+    if has_main_doc {
+        // 更新 main_doc 表
+        tx.execute(
+            "UPDATE main_doc SET title=? WHERE archive_id=?",
+            [&new_title, &archive_id],
+        )
+        .map_err(|e| err_to_string(anyhow!(e).context("更新标题失败")))?;
+
+        // 更新 main_doc_fts 索引
+        // 先删除旧的索引
+        tx.execute(
+            "DELETE FROM main_doc_fts WHERE archive_id=? AND field_name='title'",
+            [&archive_id],
+        )
+        .map_err(|e| err_to_string(anyhow!(e).context("删除旧索引失败")))?;
+
+        // 重建搜索文本并插入新索引
+        let search_text = crate::search::build_search_text(&new_title);
+        tx.execute(
+            "INSERT INTO main_doc_fts(archive_id, field_name, search_text, source_text) VALUES(?, 'title', ?, ?)",
+            [&archive_id, &search_text, &new_title],
+        )
+        .map_err(|e| err_to_string(anyhow!(e).context("更新索引失败")))?;
+    } else {
+        return Err(format!("档案 {} 没有 main_doc 记录", archive_id));
+    }
+
+    tx.commit().map_err(|e| err_to_string(anyhow!(e).context("提交事务失败")))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_archive(
     app: tauri::AppHandle,
@@ -382,9 +531,15 @@ pub fn delete_archive(
     archive_id: String,
 ) -> Result<(), String> {
     let (root, mut conn) = open_conn(&app, &state).map_err(err_to_string)?;
-    progress::emit(&app, progress::ProgressEvent::new("delete_archive", 0, 2, "开始", "删除档案数据"));
+    progress::emit(
+        &app,
+        progress::ProgressEvent::new("delete_archive", 0, 2, "开始", "删除档案数据"),
+    );
     delete_archive_impl(&root, &mut conn, &archive_id).map_err(err_to_string)?;
-    progress::emit(&app, progress::ProgressEvent::complete("delete_archive", "删除完成"));
+    progress::emit(
+        &app,
+        progress::ProgressEvent::complete("delete_archive", "删除完成"),
+    );
     Ok(())
 }
 
@@ -392,16 +547,26 @@ fn delete_archive_impl(root: &Path, conn: &mut Connection, archive_id: &str) -> 
     // 删除 store/<archive_id> 目录（先删除文件，再删DB）
     let store_dir = root.join("store").join(archive_id);
     if store_dir.exists() {
-        std::fs::remove_dir_all(&store_dir).with_context(|| format!("删除store目录失败: {}", store_dir.display()))?;
+        std::fs::remove_dir_all(&store_dir)
+            .with_context(|| format!("删除store目录失败: {}", store_dir.display()))?;
     }
 
     let tx = conn.transaction().context("开启事务失败")?;
 
     // 先清理FTS（不依赖外部内容表的自动同步）
-    tx.execute("DELETE FROM docx_blocks_fts WHERE archive_id=?", [archive_id])?;
+    tx.execute(
+        "DELETE FROM docx_blocks_fts WHERE archive_id=?",
+        [archive_id],
+    )?;
     tx.execute("DELETE FROM main_doc_fts WHERE archive_id=?", [archive_id])?;
-    tx.execute("DELETE FROM attachments_fts WHERE archive_id=?", [archive_id])?;
-    tx.execute("DELETE FROM annotations_fts WHERE archive_id=?", [archive_id])?;
+    tx.execute(
+        "DELETE FROM attachments_fts WHERE archive_id=?",
+        [archive_id],
+    )?;
+    tx.execute(
+        "DELETE FROM annotations_fts WHERE archive_id=?",
+        [archive_id],
+    )?;
 
     // 再删除主表（外键级联清理 main_doc/docx_blocks/attachments/annotations）
     tx.execute("DELETE FROM archives WHERE archive_id=?", [archive_id])?;
@@ -541,7 +706,160 @@ fn open_path_impl(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn open_conn(app: &tauri::AppHandle, state: &LibraryRootState) -> Result<(PathBuf, Connection)> {
+#[tauri::command]
+pub fn list_topics_by_date(
+    app: tauri::AppHandle,
+    state: State<'_, LibraryRootState>,
+    req: Option<ListTopicsRequest>,
+) -> Result<Vec<TopicItem>, String> {
+    let (root, conn) = open_conn(&app, &state).map_err(err_to_string)?;
+    let _ = root;
+    let req = req.unwrap_or(ListTopicsRequest {
+        date_from: None,
+        date_to: None,
+        search_query: None,
+        sort_desc: Some(true),
+        limit: Some(200),
+        offset: Some(0),
+    });
+
+    let limit = req.limit.unwrap_or(200).min(1000) as i64;
+    let offset = req.offset.unwrap_or(0) as i64;
+    let sort_desc = req.sort_desc.unwrap_or(true);
+
+    let mut where_conditions = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+    // 日期范围过滤
+    if req.date_from.is_some() || req.date_to.is_some() {
+        where_conditions.push("a.zip_date BETWEEN ? AND ?".to_string());
+        params.push(rusqlite::types::Value::from(
+            req.date_from.unwrap_or(i64::MIN),
+        ));
+        params.push(rusqlite::types::Value::from(
+            req.date_to.unwrap_or(i64::MAX),
+        ));
+    }
+
+    // 搜索查询过滤
+    if let Some(query) = &req.search_query {
+        if !query.trim().is_empty() {
+            where_conditions.push("(m.title LIKE ? OR m.instruction_no LIKE ?)".to_string());
+            let search_pattern = format!("%{}%", query.trim());
+            params.push(rusqlite::types::Value::from(search_pattern.clone()));
+            params.push(rusqlite::types::Value::from(search_pattern));
+        }
+    }
+
+    let where_clause = if where_conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_conditions.join(" AND "))
+    };
+
+    let order_clause = if sort_desc {
+        "ORDER BY latest_date DESC"
+    } else {
+        "ORDER BY latest_date ASC"
+    };
+
+    // 主查询：获取主题统计信息
+    let topics_sql = format!(
+        "SELECT 
+            COALESCE(m.title, '无标题') as title,
+            COUNT(*) as archive_count,
+            MAX(a.zip_date) as latest_date,
+            MIN(a.zip_date) as earliest_date
+        FROM archives a
+        LEFT JOIN main_doc m ON m.archive_id = a.archive_id
+        {where_clause}
+        GROUP BY COALESCE(m.title, '无标题')
+        {order_clause}
+        LIMIT ? OFFSET ?"
+    );
+
+    let mut topic_params = params.clone();
+    topic_params.push(rusqlite::types::Value::from(limit));
+    topic_params.push(rusqlite::types::Value::from(offset));
+
+    let mut topics_stmt = conn
+        .prepare(&topics_sql)
+        .map_err(|e| err_to_string(anyhow!(e)))?;
+
+    let topic_rows = topics_stmt
+        .query_map(rusqlite::params_from_iter(topic_params), |r| {
+            Ok((
+                r.get::<_, String>(0)?, // title
+                r.get::<_, i64>(1)?,    // archive_count
+                r.get::<_, i64>(2)?,    // latest_date
+                r.get::<_, i64>(3)?,    // earliest_date
+            ))
+        })
+        .map_err(|e| err_to_string(anyhow!(e)))?;
+
+    let mut topics = Vec::new();
+    for row in topic_rows {
+        let (title, archive_count, latest_date, earliest_date) =
+            row.map_err(|e| err_to_string(anyhow!(e)))?;
+        topics.push((title, archive_count, latest_date, earliest_date));
+    }
+
+    let mut result = Vec::new();
+
+    // 为每个主题获取对应的档案列表
+    for (title, archive_count, latest_date, earliest_date) in topics {
+        let archives_params: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::from(title.clone())];
+
+        let archives_sql = format!(
+            "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title, m.content
+            FROM archives a
+            LEFT JOIN main_doc m ON m.archive_id = a.archive_id
+            WHERE COALESCE(m.title, '无标题') = ?
+            ORDER BY a.zip_date DESC
+            LIMIT 50"
+        );
+
+        let mut archives_stmt = conn
+            .prepare(&archives_sql)
+            .map_err(|e| err_to_string(anyhow!(e)))?;
+
+        let archive_rows = archives_stmt
+            .query_map(rusqlite::params_from_iter(archives_params), |r| {
+                Ok(ArchiveListItem {
+                    archive_id: r.get(0)?,
+                    original_name: r.get(1)?,
+                    zip_date: r.get(2)?,
+                    imported_at: r.get(3)?,
+                    status: r.get(4)?,
+                    instruction_no: r.get(5).ok(),
+                    title: r.get(6).ok(),
+                    content: r.get(7).ok(),
+                })
+            })
+            .map_err(|e| err_to_string(anyhow!(e)))?;
+
+        let mut archives = Vec::new();
+        for archive_row in archive_rows {
+            archives.push(archive_row.map_err(|e| err_to_string(anyhow!(e)))?);
+        }
+
+        result.push(TopicItem {
+            title,
+            archive_count,
+            latest_date,
+            earliest_date,
+            archives,
+        });
+    }
+
+    Ok(result)
+}
+
+pub fn open_conn(
+    app: &tauri::AppHandle,
+    state: &LibraryRootState,
+) -> Result<(PathBuf, Connection)> {
     let root = resolve_library_root(app, state)?;
     init_db(app, &root)?;
     let conn = open_conn_at(&root)?;

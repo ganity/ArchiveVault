@@ -58,6 +58,7 @@ type ArchiveListItem = {
   status: string;
   instruction_no?: string | null;
   title?: string | null;
+  content?: string | null;
 };
 
 type FileTypeKey =
@@ -70,6 +71,11 @@ type FileTypeKey =
   | "docx_other"
   | "other"
   | "zip_child";
+
+type KeywordSuggestion = {
+  keyword: string;
+  count: number;
+};
 
 export default function SearchPage({
   onOpenArchive,
@@ -96,6 +102,15 @@ export default function SearchPage({
   const [archives, setArchives] = useState<ArchiveListItem[]>([]);
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
+
+  // 标题编辑状态
+  const [editingArchiveId, setEditingArchiveId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState<string>("");
+  const [saving, setSaving] = useState(false);
+
+  // 指令内容展开状态
+  const [expandedContent, setExpandedContent] = useState<Record<string, boolean>>({});
+
   const [typeSel, setTypeSel] = useState<Record<FileTypeKey, boolean>>({
     docx_main: true,
     annotation: true,
@@ -107,6 +122,11 @@ export default function SearchPage({
     other: true,
     zip_child: true,
   });
+
+  // 历史搜索和推荐关键词
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const [popularKeywords, setPopularKeywords] = useState<KeywordSuggestion[]>([]);
+  const [loadingKeywords, setLoadingKeywords] = useState(false);
 
   const filters: SearchFilters = useMemo(() => {
     const file_types = (Object.entries(typeSel) as [FileTypeKey, boolean][])
@@ -156,6 +176,34 @@ export default function SearchPage({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken]);
+
+  // 加载历史搜索
+  useEffect(() => {
+    try {
+      const history = localStorage.getItem("searchHistory");
+      if (history) {
+        setSearchHistory(JSON.parse(history));
+      }
+    } catch (e) {
+      console.error("加载历史搜索失败:", e);
+    }
+  }, []);
+
+  // 加载推荐关键词
+  useEffect(() => {
+    const loadPopularKeywords = async () => {
+      try {
+        setLoadingKeywords(true);
+        const keywords = await invoke<KeywordSuggestion[]>("get_popular_keywords", { limit: 10 });
+        setPopularKeywords(keywords);
+      } catch (e) {
+        console.error("加载推荐关键词失败:", e);
+      } finally {
+        setLoadingKeywords(false);
+      }
+    };
+    loadPopularKeywords();
+  }, []);
 
   const groupedResults = useMemo(() => {
     const groups = new Map<
@@ -298,6 +346,19 @@ export default function SearchPage({
       setHasMore(false);
       return;
     }
+
+    // 保存到历史搜索
+    if (reset) {
+      try {
+        const trimmedQuery = query.trim();
+        const newHistory = [trimmedQuery, ...searchHistory.filter(h => h !== trimmedQuery)].slice(0, 10);
+        setSearchHistory(newHistory);
+        localStorage.setItem("searchHistory", JSON.stringify(newHistory));
+      } catch (e) {
+        console.error("保存历史搜索失败:", e);
+      }
+    }
+
     try {
       setSearching(true);
       const nextOffset = reset ? 0 : searchOffset;
@@ -313,6 +374,44 @@ export default function SearchPage({
     } finally {
       setSearching(false);
     }
+  }
+
+  async function saveTitle(archiveId: string) {
+    if (!editingTitle.trim()) {
+      setMsg("标题不能为空");
+      return;
+    }
+    try {
+      setSaving(true);
+      await invoke("update_archive_title", {
+        archiveId,
+        newTitle: editingTitle.trim(),
+      });
+      // 更新本地缓存
+      setArchives((prev) =>
+        prev.map((a) =>
+          a.archive_id === archiveId
+            ? { ...a, title: editingTitle.trim() }
+            : a
+        )
+      );
+      setEditingArchiveId(null);
+      setEditingTitle("");
+    } catch (e: any) {
+      setMsg(String(e?.message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function startEditing(archiveId: string, currentTitle: string) {
+    setEditingArchiveId(archiveId);
+    setEditingTitle(currentTitle || "");
+  }
+
+  function cancelEditing() {
+    setEditingArchiveId(null);
+    setEditingTitle("");
   }
 
 
@@ -424,13 +523,104 @@ export default function SearchPage({
               <div key={g.archive_id} className="card animate-fade-in" style={{ padding: 0, overflow: "hidden" }}>
                 <div
                   className="search-result-header"
-                  onClick={() => onOpenArchive(g.archive_id, { kind: "docx" })}
+                  onClick={(e) => {
+                    if (editingArchiveId !== g.archive_id) {
+                      onOpenArchive(g.archive_id, { kind: "docx" });
+                    }
+                  }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start" }}>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div className="search-result-title">
-                        {meta?.title || meta?.original_name || g.archive_id}
-                      </div>
+                      {editingArchiveId === g.archive_id ? (
+                        <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <input
+                            type="text"
+                            value={editingTitle}
+                            onChange={(e) => setEditingTitle(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") saveTitle(g.archive_id);
+                              if (e.key === "Escape") cancelEditing();
+                            }}
+                            autoFocus
+                            style={{
+                              flex: 1,
+                              padding: "8px 12px",
+                              fontSize: 15,
+                              fontWeight: 600,
+                              border: "2px solid var(--primary-color)",
+                              borderRadius: 8,
+                              outline: "none"
+                            }}
+                          />
+                          <button
+                            onClick={() => saveTitle(g.archive_id)}
+                            disabled={saving}
+                            style={{
+                              padding: "8px 16px",
+                              background: "var(--primary-color)",
+                              color: "white",
+                              border: "none",
+                              borderRadius: 8,
+                              cursor: saving ? "not-allowed" : "pointer",
+                              fontSize: 13,
+                              fontWeight: 600
+                            }}
+                          >
+                            {saving ? "保存中..." : "保存"}
+                          </button>
+                          <button
+                            onClick={cancelEditing}
+                            disabled={saving}
+                            style={{
+                              padding: "8px 16px",
+                              background: "#e2e8f0",
+                              color: "#475569",
+                              border: "none",
+                              borderRadius: 8,
+                              cursor: saving ? "not-allowed" : "pointer",
+                              fontSize: 13
+                            }}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div className="search-result-title">
+                            {meta?.title || meta?.original_name || g.archive_id}
+                          </div>
+                          {meta?.title && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startEditing(g.archive_id, meta.title || "");
+                              }}
+                              style={{
+                                padding: "4px 8px",
+                                background: "transparent",
+                                border: "1px solid var(--border-color)",
+                                borderRadius: 6,
+                                cursor: "pointer",
+                                fontSize: 12,
+                                color: "var(--text-muted)",
+                                opacity: 0.7,
+                                transition: "all 0.2s"
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.opacity = "1";
+                                e.currentTarget.style.backgroundColor = "#f1f5f9";
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.opacity = "0.7";
+                                e.currentTarget.style.backgroundColor = "transparent";
+                              }}
+                              title="编辑标题"
+                            >
+                              ✏️
+                            </button>
+                          )}
+                        </div>
+                      )}
                       <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 12, color: "var(--text-muted)" }}>
                         {meta?.instruction_no && (
                           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -441,6 +631,61 @@ export default function SearchPage({
                           <span style={{ opacity: 0.5 }}>📍</span> {g.total_hits} 条命中
                         </span>
                       </div>
+                      {/* 指令内容 */}
+                      {meta?.content && (
+                        <div style={{
+                          marginTop: 12,
+                          padding: "10px 12px",
+                          background: "#f8fafc",
+                          borderRadius: 8,
+                          fontSize: 13,
+                          color: "var(--text-main)",
+                          lineHeight: 1.6,
+                          borderTop: "1px solid var(--border-color)"
+                        }}>
+                          <div style={{
+                            fontSize: 11,
+                            fontWeight: 600,
+                            color: "var(--text-muted)",
+                            marginBottom: 6,
+                            textTransform: "uppercase"
+                          }}>
+                            指令内容
+                          </div>
+                          <div style={{
+                            display: expandedContent[g.archive_id] ? "block" : "-webkit-box",
+                            WebkitLineClamp: expandedContent[g.archive_id] ? "unset" : 3,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis"
+                          }}>
+                            {meta.content}
+                          </div>
+                          {meta.content.length > 100 && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedContent(prev => ({
+                                  ...prev,
+                                  [g.archive_id]: !prev[g.archive_id]
+                                }));
+                              }}
+                              style={{
+                                marginTop: 8,
+                              padding: "4px 8px",
+                              background: "none",
+                              border: "none",
+                              color: "var(--primary-color)",
+                              fontSize: 12,
+                              cursor: "pointer",
+                              fontWeight: 500
+                            }}
+                            >
+                              {expandedContent[g.archive_id] ? "收起 ▲" : "展开全部 ↓"}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -531,16 +776,150 @@ export default function SearchPage({
           ) : (
             results.length === 0 && !searching && (
               <div style={{
-                textAlign: "center",
-                padding: "80px 20px",
-                color: "var(--text-muted)",
+                padding: "40px 20px",
                 background: "white",
                 borderRadius: 20,
                 border: "1px dashed var(--border-color)"
               }}>
-                <div style={{ fontSize: 40, marginBottom: 16 }}>🔍</div>
-                <div style={{ fontSize: 16, fontWeight: 500 }}>开始搜索以查看结果</div>
-                <div style={{ fontSize: 13, opacity: 0.7, marginTop: 4 }}>您可以输入关键词搜索全文或特定字段</div>
+                {/* 历史搜索 */}
+                {searchHistory.length > 0 && (
+                  <div style={{ marginBottom: 32 }}>
+                    <div style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 16
+                    }}>
+                      <h3 style={{
+                        fontSize: 15,
+                        fontWeight: 600,
+                        color: "var(--text-main)",
+                        margin: 0
+                      }}>
+                        🕐 历史搜索
+                      </h3>
+                      <button
+                        onClick={() => {
+                          setSearchHistory([]);
+                          localStorage.removeItem("searchHistory");
+                        }}
+                        style={{
+                          padding: "4px 12px",
+                          background: "transparent",
+                          border: "1px solid var(--border-color)",
+                          borderRadius: 6,
+                          fontSize: 12,
+                          color: "var(--text-muted)",
+                          cursor: "pointer"
+                        }}
+                      >
+                        清空
+                      </button>
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {searchHistory.map((keyword, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => {
+                            setQuery(keyword);
+                            runSearch(true);
+                          }}
+                          style={{
+                            padding: "8px 14px",
+                            background: "#f8fafc",
+                            border: "1px solid var(--border-color)",
+                            borderRadius: 16,
+                            fontSize: 13,
+                            color: "var(--text-main)",
+                            cursor: "pointer",
+                            transition: "all 0.2s"
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "#e2e8f0";
+                            e.currentTarget.style.borderColor = "#cbd5e1";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "#f8fafc";
+                            e.currentTarget.style.borderColor = "var(--border-color)";
+                          }}
+                        >
+                          {keyword}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 推荐关键词 */}
+                <div>
+                  <h3 style={{
+                    fontSize: 15,
+                    fontWeight: 600,
+                    color: "var(--text-main)",
+                    marginBottom: 16,
+                    marginTop: 0
+                  }}>
+                    🔥 推荐关键词
+                  </h3>
+                  {loadingKeywords ? (
+                    <div style={{
+                      padding: "20px",
+                      textAlign: "center",
+                      color: "var(--text-muted)",
+                      fontSize: 13
+                    }}>
+                      加载中...
+                    </div>
+                  ) : popularKeywords.length > 0 ? (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {popularKeywords.map((kw, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => {
+                            setQuery(kw.keyword);
+                            runSearch(true);
+                          }}
+                          style={{
+                            padding: "8px 14px",
+                            background: "#fef3c7",
+                            border: "1px solid #fde68a",
+                            borderRadius: 16,
+                            fontSize: 13,
+                            color: "#92400e",
+                            cursor: "pointer",
+                            transition: "all 0.2s",
+                            position: "relative"
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "#fde68a";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "#fef3c7";
+                          }}
+                          title={`出现 ${kw.count} 次`}
+                        >
+                          {kw.keyword}
+                          <span style={{
+                            marginLeft: 6,
+                            fontSize: 11,
+                            opacity: 0.7
+                          }}>
+                            ({kw.count})
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{
+                      padding: "20px",
+                      textAlign: "center",
+                      color: "var(--text-muted)",
+                      fontSize: 13
+                    }}>
+                      暂无推荐关键词
+                    </div>
+                  )}
+                </div>
               </div>
             )
           )}
