@@ -40,7 +40,13 @@ pub fn pick_zip_files() -> Result<Vec<String>, String> {
         .unwrap_or_default();
     Ok(files
         .into_iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .filter_map(|p| {
+            // 在 Windows 上，尝试直接使用 OsString 的字节表示
+            // 避免使用 to_string_lossy() 导致的路径损坏
+            // 调试：打印原始路径
+            eprintln!("选择的文件: {:?}, 字节: {:?}", p, p.as_os_str().as_encoded_bytes());
+            Some(p.to_string_lossy().to_string())
+        })
         .collect())
 }
 
@@ -371,6 +377,10 @@ fn import_one_zip(
     zip_idx: usize,
     zip_total: usize,
 ) -> Result<db::ArchiveRow> {
+    // 在 Windows 上规范化路径，解决路径编码和大小写问题
+    let source_path = source_path.canonicalize()
+        .with_context(|| format!("无法规范化路径: {}", source_path.display()))?;
+
     let original_name = source_path
         .file_name()
         .and_then(|s| s.to_str())
@@ -380,7 +390,24 @@ fn import_one_zip(
     let zip_date = parse_zip_date_from_name(&original_name, imported_at);
 
     emit_import_progress(app, zip_idx, zip_total, 1, "计算指纹", &original_name);
-    let sha256 = sha256_file(source_path)?;
+
+    // 调试日志：打印文件路径
+    eprintln!("=== 导入调试 ===");
+    eprintln!("原始路径: {}", source_path.display());
+    eprintln!("路径字节: {:?}", source_path.as_os_str().as_encoded_bytes());
+    eprintln!("文件名: {}", original_name);
+
+    let sha256 = match sha256_file(&source_path) {
+        Ok(hash) => {
+            eprintln!("SHA256: {}", hash);
+            hash
+        }
+        Err(e) => {
+            eprintln!("SHA256计算失败: {:#?}", e);
+            return Err(e.context("SHA256计算失败"));
+        }
+    };
+
     let exists: Option<String> = conn
         .query_row(
             "SELECT archive_id FROM archives WHERE sha256=?",
@@ -388,6 +415,8 @@ fn import_one_zip(
             |r| r.get(0),
         )
         .optional()?;
+
+    eprintln!("数据库中已存在: {:?}", exists);
     if exists.is_some() {
         return Err(anyhow!("__SKIP__ 已存在"));
     }
@@ -399,7 +428,7 @@ fn import_one_zip(
     let run = (|| -> Result<db::ArchiveRow> {
         emit_import_progress(app, zip_idx, zip_total, 2, "复制ZIP", &stored_rel);
         fs::create_dir_all(stored_abs.parent().unwrap())?;
-        fs::copy(source_path, &stored_abs)?;
+        fs::copy(&source_path, &stored_abs)?;
 
         // 先写入 archives（processing）
         emit_import_progress(app, zip_idx, zip_total, 2, "写入数据库", "archives");
