@@ -41,11 +41,10 @@ pub fn pick_zip_files() -> Result<Vec<String>, String> {
     Ok(files
         .into_iter()
         .filter_map(|p| {
-            // 在 Windows 上，尝试直接使用 OsString 的字节表示
-            // 避免使用 to_string_lossy() 导致的路径损坏
+            // Windows: 使用 display() 而不是 to_string_lossy() 来保持路径完整性
             // 调试：打印原始路径
-            eprintln!("选择的文件: {:?}, 字节: {:?}", p, p.as_os_str().as_encoded_bytes());
-            Some(p.to_string_lossy().to_string())
+            eprintln!("选择的文件: {:?}", p);
+            Some(p.display().to_string())
         })
         .collect())
 }
@@ -81,7 +80,8 @@ fn collect_zip_files(dir: &Path, out: &mut Vec<String>, limit: usize) -> Result<
         } else if ty.is_file() {
             let lower = name.to_ascii_lowercase();
             if lower.ends_with(".zip") {
-                out.push(path.to_string_lossy().to_string());
+                // Windows: 使用 display() 保持路径完整性
+                out.push(path.display().to_string());
                 if out.len() >= limit {
                     break;
                 }
@@ -377,9 +377,17 @@ fn import_one_zip(
     zip_idx: usize,
     zip_total: usize,
 ) -> Result<db::ArchiveRow> {
-    // 在 Windows 上规范化路径，解决路径编码和大小写问题
-    let source_path = source_path.canonicalize()
-        .with_context(|| format!("无法规范化路径: {}", source_path.display()))?;
+    // 在 Windows 上规范化路径，但需要处理 UNC 路径格式
+    let source_path = if cfg!(target_os = "windows") {
+        // Windows: 先检查文件是否存在，避免 canonicalize 产生 UNC 路径问题
+        if !source_path.exists() {
+            return Err(anyhow!("文件不存在: {}", source_path.display()));
+        }
+        source_path.to_path_buf()
+    } else {
+        source_path.canonicalize()
+            .with_context(|| format!("无法规范化路径: {}", source_path.display()))?
+    };
 
     let original_name = source_path
         .file_name()
@@ -439,7 +447,7 @@ fn import_one_zip(
                 archive_id,
                 sha256,
                 original_name,
-                source_path.to_string_lossy().to_string(),
+                source_path.display().to_string(),  // Windows: 使用 display() 而不是 to_string_lossy()
                 stored_rel,
                 zip_date,
                 imported_at,
