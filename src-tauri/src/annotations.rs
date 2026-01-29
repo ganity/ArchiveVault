@@ -1,7 +1,7 @@
 use crate::db;
 use crate::library_root::{resolve_library_root, LibraryRootState};
 use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
@@ -9,9 +9,15 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAnnotationReq {
     pub archive_id: String,
-    pub target_kind: String, // docx | pdf | media
-    pub target_ref: String,  // docx: archive_id; pdf/media: file_id
+    pub target_kind: String, // docx | pdf | media | archive_remark | main_doc
+    pub target_ref: String,  // docx: archive_id; pdf/media: file_id; main_doc: field_name
     pub locator: serde_json::Value,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAnnotationReq {
+    pub annotation_id: String,
     pub content: String,
 }
 
@@ -146,4 +152,132 @@ fn delete_annotation_impl(
     conn.execute("DELETE FROM annotations WHERE annotation_id=?", [annotation_id])?;
     conn.execute("DELETE FROM annotations_fts WHERE annotation_id=?", [annotation_id])?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn update_annotation(
+    app: tauri::AppHandle,
+    state: State<'_, LibraryRootState>,
+    req: UpdateAnnotationReq,
+) -> Result<AnnotationResp, String> {
+    update_annotation_impl(&app, &state, req).map_err(db::err_to_string)
+}
+
+fn update_annotation_impl(
+    app: &tauri::AppHandle,
+    state: &LibraryRootState,
+    req: UpdateAnnotationReq,
+) -> Result<AnnotationResp> {
+    if req.content.trim().is_empty() {
+        return Err(anyhow!("批注内容不能为空"));
+    }
+    let root = resolve_library_root(app, state)?;
+    db::init_db(app, &root)?;
+    let conn = Connection::open(root.join("db.sqlite"))?;
+
+    let now = chrono::Utc::now().timestamp();
+
+    // 先查询现有批注信息
+    let (archive_id, target_kind, target_ref, locator_json): (String, String, String, String) =
+        conn.query_row(
+            "SELECT archive_id, target_kind, target_ref, locator_json FROM annotations WHERE annotation_id=?",
+            [&req.annotation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+
+    // 更新批注
+    conn.execute(
+        "UPDATE annotations SET content=?, updated_at=? WHERE annotation_id=?",
+        [&req.content, &now.to_string(), &req.annotation_id],
+    )?;
+
+    // 更新 FTS 索引
+    let search_text = crate::search::build_search_text(&req.content);
+    conn.execute(
+        "UPDATE annotations_fts SET search_text=?, source_text=? WHERE annotation_id=?",
+        [&search_text, &req.content, &req.annotation_id],
+    )?;
+
+    let locator: serde_json::Value = serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
+    Ok(AnnotationResp {
+        annotation_id: req.annotation_id,
+        archive_id,
+        target_kind,
+        target_ref,
+        locator,
+        content: req.content,
+        created_at: 0, // 未查询
+        updated_at: now,
+    })
+}
+
+#[tauri::command]
+pub fn create_or_update_annotation(
+    app: tauri::AppHandle,
+    state: State<'_, LibraryRootState>,
+    req: CreateAnnotationReq,
+) -> Result<AnnotationResp, String> {
+    create_or_update_annotation_impl(&app, &state, req).map_err(db::err_to_string)
+}
+
+fn create_or_update_annotation_impl(
+    app: &tauri::AppHandle,
+    state: &LibraryRootState,
+    req: CreateAnnotationReq,
+) -> Result<AnnotationResp> {
+    let root = resolve_library_root(app, state)?;
+    db::init_db(app, &root)?;
+    let conn = Connection::open(root.join("db.sqlite"))?;
+
+    // 查找是否已存在相同的批注（根据 archive_id + target_kind + target_ref）
+    let existing: Option<(String, String, String, String, String, i64)> = conn
+        .query_row(
+            "SELECT annotation_id, archive_id, target_kind, target_ref, locator_json, created_at
+             FROM annotations
+             WHERE archive_id=? AND target_kind=? AND target_ref=?",
+            [&req.archive_id, &req.target_kind, &req.target_ref],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let now = chrono::Utc::now().timestamp();
+
+    if let Some((annotation_id, archive_id, target_kind, target_ref, locator_json, created_at)) = existing {
+        // 更新现有批注
+        conn.execute(
+            "UPDATE annotations SET content=?, updated_at=? WHERE annotation_id=?",
+            [&req.content, &now.to_string(), &annotation_id],
+        )?;
+
+        // 更新 FTS 索引
+        let search_text = crate::search::build_search_text(&req.content);
+        conn.execute(
+            "UPDATE annotations_fts SET search_text=?, source_text=? WHERE annotation_id=?",
+            [&search_text, &req.content, &annotation_id],
+        )?;
+
+        let locator: serde_json::Value = serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
+        Ok(AnnotationResp {
+            annotation_id,
+            archive_id,
+            target_kind,
+            target_ref,
+            locator,
+            content: req.content,
+            created_at,
+            updated_at: now,
+        })
+    } else {
+        // 创建新批注
+        create_annotation_impl(app, state, req)
+    }
 }

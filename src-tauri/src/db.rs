@@ -317,6 +317,9 @@ pub struct ArchiveListItem {
     pub instruction_no: Option<String>,
     pub title: Option<String>,
     pub content: Option<String>,
+    pub issued_at: Option<String>,
+    pub archive_remark: Option<String>,
+    pub content_annotations: Vec<AnnotationRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,7 +371,7 @@ pub fn list_archives(
     }
 
     let sql = format!(
-        "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title, m.content
+        "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title, m.content, m.issued_at
          FROM archives a
          LEFT JOIN main_doc m ON m.archive_id=a.archive_id
          {where_sql}
@@ -378,6 +381,84 @@ pub fn list_archives(
     params_vec.push(rusqlite::types::Value::from(limit));
     params_vec.push(rusqlite::types::Value::from(offset));
 
+    let mut stmt = conn.prepare(&sql).map_err(|e| err_to_string(anyhow!(e)))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params_vec.clone()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5).ok(),
+                r.get::<_, Option<String>>(6).ok(),
+                r.get::<_, Option<String>>(7).ok(),
+                r.get::<_, Option<String>>(8).ok(),
+            ))
+        })
+        .map_err(|e| err_to_string(anyhow!(e)))?;
+
+    // 收集所有 archive_id
+    let archive_ids: Vec<String> = rows
+        .map(|r| r.map_err(|e| err_to_string(anyhow!(e))).map(|(id, ..)| id))
+        .collect::<Result<_, _>>()?;
+
+    if archive_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // 查询所有相关的批注
+    let placeholders = archive_ids.iter().enumerate()
+        .map(|(i, _)| if i == 0 { "?".to_string() } else { format!(", ?") })
+        .collect::<String>();
+    let annotation_sql = format!(
+        "SELECT annotation_id, archive_id, target_kind, target_ref, locator_json, content, created_at, updated_at
+         FROM annotations
+         WHERE archive_id IN ({})",
+        placeholders
+    );
+    let mut annotation_stmt = conn.prepare(&annotation_sql).map_err(|e| err_to_string(anyhow!(e)))?;
+    let annotation_params: Vec<rusqlite::types::Value> =
+        archive_ids.iter().map(|id| rusqlite::types::Value::from(id.clone())).collect();
+    let annotation_rows = annotation_stmt
+        .query_map(rusqlite::params_from_iter(annotation_params), |r| {
+            let locator_json: String = r.get(4)?;
+            let locator = serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
+            Ok((
+                r.get::<_, String>(0)?,  // annotation_id
+                r.get::<_, String>(1)?,  // archive_id
+                r.get::<_, String>(2)?,  // target_kind
+                r.get::<_, String>(3)?,  // target_ref
+                locator,                  // locator
+                r.get::<_, String>(5)?,  // content
+                r.get::<_, i64>(6)?,     // created_at
+                r.get::<_, i64>(7)?,     // updated_at
+            ))
+        })
+        .map_err(|e| err_to_string(anyhow!(e)))?;
+
+    // 按 archive_id 分组批注
+    use std::collections::HashMap;
+    let mut annotations_by_archive: HashMap<String, Vec<AnnotationRow>> = HashMap::new();
+    for row in annotation_rows {
+        let (annotation_id, archive_id, target_kind, target_ref, locator, content, created_at, updated_at) =
+            row.map_err(|e| err_to_string(anyhow!(e)))?;
+        let annotation = AnnotationRow {
+            annotation_id,
+            target_kind,
+            target_ref,
+            locator,
+            content,
+            created_at,
+            updated_at,
+        };
+        annotations_by_archive
+            .entry(archive_id)
+            .or_insert_with(Vec::new)
+            .push(annotation);
+    }
+
+    // 重新查询档案数据并组装
     let mut stmt = conn.prepare(&sql).map_err(|e| err_to_string(anyhow!(e)))?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params_vec), |r| {
@@ -390,12 +471,35 @@ pub fn list_archives(
                 instruction_no: r.get(5).ok(),
                 title: r.get(6).ok(),
                 content: r.get(7).ok(),
+                issued_at: r.get(8).ok(),
+                archive_remark: None,
+                content_annotations: vec![],
             })
         })
         .map_err(|e| err_to_string(anyhow!(e)))?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| err_to_string(anyhow!(e)))?);
+        let mut item = row.map_err(|e| err_to_string(anyhow!(e)))?;
+
+        // 填充批注数据
+        if let Some(annotations) = annotations_by_archive.get(&item.archive_id) {
+            // 查找 archive_remark 批注
+            for ann in annotations {
+                if ann.target_kind == "archive_remark" {
+                    item.archive_remark = Some(ann.content.clone());
+                    break;
+                }
+            }
+
+            // 查找 content_annotations 批注
+            item.content_annotations = annotations
+                .iter()
+                .filter(|ann| ann.target_kind == "main_doc" && ann.target_ref == "content")
+                .cloned()
+                .collect();
+        }
+
+        out.push(item);
     }
     Ok(out)
 }
@@ -812,7 +916,7 @@ pub fn list_topics_by_date(
             vec![rusqlite::types::Value::from(title.clone())];
 
         let archives_sql = format!(
-            "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title, m.content
+            "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title, m.content, m.issued_at
             FROM archives a
             LEFT JOIN main_doc m ON m.archive_id = a.archive_id
             WHERE COALESCE(m.title, '无标题') = ?
@@ -835,6 +939,9 @@ pub fn list_topics_by_date(
                     instruction_no: r.get(5).ok(),
                     title: r.get(6).ok(),
                     content: r.get(7).ok(),
+                    issued_at: r.get(8).ok(),
+                    archive_remark: None,
+                    content_annotations: vec![],
                 })
             })
             .map_err(|e| err_to_string(anyhow!(e)))?;

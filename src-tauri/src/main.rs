@@ -55,6 +55,8 @@ fn main() {
             annotations::create_annotation,
             annotations::list_annotations,
             annotations::delete_annotation,
+            annotations::update_annotation,
+            annotations::create_or_update_annotation,
             db::open_path
         ])
         .run(tauri::generate_context!())
