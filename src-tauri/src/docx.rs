@@ -1,5 +1,5 @@
-use crate::db;
 use crate::cache;
+use crate::db;
 use crate::library_root::{resolve_library_root, LibraryRootState};
 use anyhow::{anyhow, Context, Result};
 use quick_xml::events::Event;
@@ -7,8 +7,8 @@ use quick_xml::Reader as XmlReader;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::io::{Cursor, Read};
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::Path;
 use tauri::State;
 use zip::ZipArchive;
@@ -91,16 +91,17 @@ fn get_docx_attachment_preview_impl(
         .with_context(|| format!("找不到附件: {file_id}"))?;
 
     // 复用现有缓存解压逻辑，确保 docx 已被解压到 cache 并记录 cached_path
-    let preview = cache::get_attachment_preview_path_impl(app, state, file_id)
-        .context("解压docx失败")?;
-    let bytes = fs::read(&preview.path).with_context(|| format!("读取docx失败: {}", preview.path))?;
+    let preview =
+        cache::get_attachment_preview_path_impl(app, state, file_id).context("解压docx失败")?;
+    let bytes =
+        fs::read(&preview.path).with_context(|| format!("读取docx失败: {}", preview.path))?;
 
     let document_xml = read_docx_document_xml(&bytes)?;
     let paragraphs = extract_paragraph_texts_ignore_tables_with_pagebreak(&document_xml, true)?;
 
     // 尝试提取 docx 内嵌图片（常见于附加docx）
-    let image_paths = extract_docx_images_to_cache(&bytes, &root, &archive_id, file_id)
-        .unwrap_or_default();
+    let image_paths =
+        extract_docx_images_to_cache(&bytes, &root, &archive_id, file_id).unwrap_or_default();
 
     Ok(DocxAttachmentPreview {
         file_id: file_id.to_string(),
@@ -394,7 +395,9 @@ fn normalize_text_minimal(s: &str) -> String {
         .replace('\u{3000}', " ")
 }
 
-fn extract_fields_and_map(blocks: &[DocxBlock]) -> Result<(String, String, String, String, String)> {
+fn extract_fields_and_map(
+    blocks: &[DocxBlock],
+) -> Result<(String, String, String, String, String)> {
     // 支持两种常见格式：
     // 1) 每行/每段落以“指令标题：xxx”开头
     // 2) 同一段落内连续出现“指令编号：xxx 指令标题：yyy 下发时间：zzz 指令内容：ccc”
@@ -446,9 +449,13 @@ fn extract_fields_and_map(blocks: &[DocxBlock]) -> Result<(String, String, Strin
                 rest = rest.trim_matches(|c: char| c == '\n' || c == '\t' || c == ' ' || c == '　');
 
                 let canonical = match key.as_str() {
-                    "指令编号" | "编号" | "文号" | "发文字号" | "文件编号" | "指令号" => "instruction_no",
+                    "指令编号" | "编号" | "文号" | "发文字号" | "文件编号" | "指令号" => {
+                        "instruction_no"
+                    }
                     "指令标题" | "标题" | "主题" | "事项" | "名称" => "title",
-                    "下发时间" | "时间" | "日期" | "下发日期" | "签发时间" | "发文日期" => "issued_at",
+                    "下发时间" | "时间" | "日期" | "下发日期" | "签发时间" | "发文日期" => {
+                        "issued_at"
+                    }
                     "指令内容" | "内容" | "正文" | "主要内容" => "content",
                     _ => "unknown",
                 };

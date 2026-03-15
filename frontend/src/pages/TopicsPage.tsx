@@ -90,10 +90,11 @@ export default function TopicsPage({
       setOffset(0);
       setTotalFetched(0);
       setHasMore(true);
+      const initialRequest = { ...request, offset: 0 };
 
       // 清空搜索，避免混淆
       // 注意：我们不在后端搜索，只在前端过滤
-      const result = await invoke<ArchiveListItem[]>("list_archives", { req: request });
+      const result = await invoke<ArchiveListItem[]>("list_archives", { req: initialRequest });
 
       // 前端过滤：根据搜索关键词过滤标题、指令编号、备注和批注
       let filtered = result;
@@ -117,7 +118,6 @@ export default function TopicsPage({
           return matchBasic || matchRemark || matchAnnotations;
         });
       }
-
       setArchives(filtered);
       setTotalFetched(result.length);
       // 如果返回数量少于 limit，说明没有更多数据了
@@ -1103,13 +1103,22 @@ export default function TopicsPage({
 }
 
 function toTsStart(date: string): number | null {
-  if (!date) return null;
-  const d = new Date(`${date}T00:00:00+08:00`);
+  const d = parseLocalDate(date, false);
+  if (!d) return null;
   return Math.floor(d.getTime() / 1000);
 }
 
 function toTsEnd(date: string): number | null {
-  if (!date) return null;
-  const d = new Date(`${date}T23:59:59+08:00`);
+  const d = parseLocalDate(date, true);
+  if (!d) return null;
   return Math.floor(d.getTime() / 1000);
+}
+
+function parseLocalDate(date: string, endOfDay: boolean): Date | null {
+  if (!date) return null;
+  const [year, month, day] = date.split("-").map(Number);
+  if (![year, month, day].every(Number.isFinite)) return null;
+  return endOfDay
+    ? new Date(year, month - 1, day, 23, 59, 59, 999)
+    : new Date(year, month - 1, day, 0, 0, 0, 0);
 }

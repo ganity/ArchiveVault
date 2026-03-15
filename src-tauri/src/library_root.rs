@@ -25,10 +25,7 @@ pub struct LibraryRootState {
 }
 
 fn default_library_root(app: &tauri::AppHandle) -> Result<PathBuf> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .context("无法获取AppData目录")?;
+    let base = app.path().app_data_dir().context("无法获取AppData目录")?;
     Ok(base.join("ArchiveVaultLibrary"))
 }
 
@@ -38,10 +35,7 @@ fn ensure_dir(p: &Path) -> Result<()> {
 }
 
 fn app_config_path(app: &tauri::AppHandle) -> Result<PathBuf> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .context("无法获取AppData目录")?;
+    let base = app.path().app_data_dir().context("无法获取AppData目录")?;
     ensure_dir(&base)?;
     Ok(base.join(APP_CONFIG_FILE))
 }
@@ -186,7 +180,8 @@ pub fn migrate_library_minimal_move(
         &app,
         progress::ProgressEvent::new("migrate", 0, total, "开始迁移", "准备迁移"),
     );
-    migrate_minimal_move(&app, &from_root, &to_root, &archive_ids, total).map_err(db::err_to_string)?;
+    migrate_minimal_move(&app, &from_root, &to_root, &archive_ids, total)
+        .map_err(db::err_to_string)?;
     progress::emit(
         &app,
         progress::ProgressEvent::new("migrate", total - 1, total, "收尾", "更新配置"),
@@ -200,7 +195,10 @@ pub fn migrate_library_minimal_move(
     ) {
         eprintln!("保存应用配置失败: {e:#}");
     }
-    progress::emit(&app, progress::ProgressEvent::complete("migrate", "迁移完成"));
+    progress::emit(
+        &app,
+        progress::ProgressEvent::complete("migrate", "迁移完成"),
+    );
     Ok("迁移完成".to_string())
 }
 
@@ -218,7 +216,12 @@ fn migrate_minimal_move(
     if !from_db.exists() {
         return Err(anyhow!("迁移失败：源库缺少 db.sqlite"));
     }
-    if to_root.exists() && fs::read_dir(to_root).ok().and_then(|mut it| it.next()).is_some() {
+    if to_root.exists()
+        && fs::read_dir(to_root)
+            .ok()
+            .and_then(|mut it| it.next())
+            .is_some()
+    {
         return Err(anyhow!("迁移失败：目标目录非空"));
     }
     ensure_dir(to_root)?;
@@ -250,13 +253,20 @@ fn migrate_minimal_move(
             return Err(anyhow!("迁移失败：缺少源数据目录 store/{}", archive_id));
         }
         let dst_dir = to_root.join("store").join(archive_id);
-        copy_dir_all(&src_dir, &dst_dir).with_context(|| format!("复制 store/{} 失败", archive_id))?;
+        copy_dir_all(&src_dir, &dst_dir)
+            .with_context(|| format!("复制 store/{} 失败", archive_id))?;
     }
 
     // 阶段2：写 meta 到新库（并校验 stored_path 都存在）
     progress::emit(
         app,
-        progress::ProgressEvent::new("migrate", total - 2, total, "校验", "写入 meta 并校验 ZIP 路径"),
+        progress::ProgressEvent::new(
+            "migrate",
+            total - 2,
+            total,
+            "校验",
+            "写入 meta 并校验 ZIP 路径",
+        ),
     );
     db::write_meta(
         app,
@@ -271,7 +281,13 @@ fn migrate_minimal_move(
     // 阶段3：清理旧库（仅删除 DB 引用的 store/<archive_id>，最后删除 db.sqlite）
     progress::emit(
         app,
-        progress::ProgressEvent::new("migrate", total - 1, total, "清理旧库", "删除旧库引用的数据"),
+        progress::ProgressEvent::new(
+            "migrate",
+            total - 1,
+            total,
+            "清理旧库",
+            "删除旧库引用的数据",
+        ),
     );
     for archive_id in archive_ids {
         let src_dir = from_root.join("store").join(archive_id);

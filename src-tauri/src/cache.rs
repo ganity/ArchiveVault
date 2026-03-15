@@ -17,10 +17,19 @@ pub struct PreviewPathResp {
 }
 
 #[tauri::command]
-pub fn cleanup_cache(app: tauri::AppHandle, state: State<'_, LibraryRootState>) -> Result<String, String> {
-    progress::emit(&app, progress::ProgressEvent::new("cleanup_cache", 0, 2, "开始", "准备清理缓存"));
+pub fn cleanup_cache(
+    app: tauri::AppHandle,
+    state: State<'_, LibraryRootState>,
+) -> Result<String, String> {
+    progress::emit(
+        &app,
+        progress::ProgressEvent::new("cleanup_cache", 0, 2, "开始", "准备清理缓存"),
+    );
     let r = cleanup_cache_impl(&app, &state).map_err(db::err_to_string)?;
-    progress::emit(&app, progress::ProgressEvent::complete("cleanup_cache", "清理缓存完成"));
+    progress::emit(
+        &app,
+        progress::ProgressEvent::complete("cleanup_cache", "清理缓存完成"),
+    );
     Ok(r)
 }
 
@@ -45,9 +54,15 @@ pub fn cleanup_archive_cache(
     state: State<'_, LibraryRootState>,
     archive_id: String,
 ) -> Result<String, String> {
-    progress::emit(&app, progress::ProgressEvent::new("cleanup_archive_cache", 0, 2, "开始", "准备清理档案缓存"));
+    progress::emit(
+        &app,
+        progress::ProgressEvent::new("cleanup_archive_cache", 0, 2, "开始", "准备清理档案缓存"),
+    );
     let r = cleanup_archive_cache_impl(&app, &state, &archive_id).map_err(db::err_to_string)?;
-    progress::emit(&app, progress::ProgressEvent::complete("cleanup_archive_cache", "清理档案缓存完成"));
+    progress::emit(
+        &app,
+        progress::ProgressEvent::complete("cleanup_archive_cache", "清理档案缓存完成"),
+    );
     Ok(r)
 }
 
@@ -108,8 +123,15 @@ pub(crate) fn get_attachment_preview_path_impl(
         .optional()?
         .ok_or_else(|| anyhow!("找不到附件: {file_id}"))?;
 
-    let (archive_id, _file_type, source_depth, container_virtual_path, virtual_path, cached_path, display_name) =
-        row;
+    let (
+        archive_id,
+        _file_type,
+        source_depth,
+        container_virtual_path,
+        virtual_path,
+        cached_path,
+        display_name,
+    ) = row;
 
     if let Some(rel) = cached_path {
         let abs = root.join(&rel);
@@ -176,7 +198,10 @@ fn read_entry_from_zip_bytes(zip_bytes: &[u8], virtual_path: &str) -> Result<Vec
     read_entry_bytes(&mut zip, virtual_path)
 }
 
-fn read_entry_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, virtual_path: &str) -> Result<Vec<u8>> {
+fn read_entry_bytes<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    virtual_path: &str,
+) -> Result<Vec<u8>> {
     if let Ok(mut f) = zip.by_name(virtual_path) {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;

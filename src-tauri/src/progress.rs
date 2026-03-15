@@ -39,4 +39,3 @@ pub fn emit(app: &tauri::AppHandle, event: ProgressEvent) {
     // 失败不阻断主流程
     let _ = app.emit("progress_update", &event);
 }
-

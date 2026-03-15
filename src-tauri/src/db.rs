@@ -1,6 +1,7 @@
 use crate::library_root::{resolve_library_root, LibraryRootState};
 use crate::progress;
 use anyhow::{anyhow, Context, Result};
+use chrono::{FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS main_doc (
   instruction_no TEXT NOT NULL,
   title TEXT NOT NULL,
   issued_at TEXT NOT NULL,
+  issued_at_ts INTEGER NOT NULL DEFAULT 0,
   content TEXT NOT NULL,
   field_block_map_json TEXT NOT NULL,
   FOREIGN KEY(archive_id) REFERENCES archives(archive_id) ON DELETE CASCADE
@@ -178,6 +180,114 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 "#,
     )?;
+    ensure_main_doc_issued_at_ts(conn)?;
+    Ok(())
+}
+
+fn tz_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 3600).expect("tz")
+}
+
+pub fn parse_issued_at_to_ts(text: &str) -> Option<i64> {
+    let raw = text.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let s = raw
+        .replace('年', "-")
+        .replace('月', "-")
+        .replace('日', " ")
+        .replace('/', "-")
+        .replace('.', "-")
+        .replace('T', " ")
+        .replace('：', ":");
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let datetime_formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H时%M分%S秒",
+        "%Y-%m-%d %H时%M分",
+    ];
+    for fmt in datetime_formats {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(&s, fmt) {
+            if let Some(ts) = tz_offset().from_local_datetime(&dt).single() {
+                return Some(ts.timestamp());
+            }
+        }
+    }
+
+    let date_formats = ["%Y-%m-%d"];
+    for fmt in date_formats {
+        if let Ok(date) = NaiveDate::parse_from_str(&s, fmt) {
+            if let Some(dt) = date.and_hms_opt(0, 0, 0) {
+                if let Some(ts) = tz_offset().from_local_datetime(&dt).single() {
+                    return Some(ts.timestamp());
+                }
+            }
+        }
+    }
+
+    let nums = raw
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if nums.len() >= 3 {
+        let year = nums[0].parse::<i32>().ok()?;
+        let month = nums[1].parse::<u32>().ok()?;
+        let day = nums[2].parse::<u32>().ok()?;
+        let hour = nums.get(3).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let minute = nums.get(4).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let second = nums.get(5).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let dt = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
+        return tz_offset()
+            .from_local_datetime(&dt)
+            .single()
+            .map(|v| v.timestamp());
+    }
+
+    None
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_main_doc_issued_at_ts(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "main_doc", "issued_at_ts")? {
+        conn.execute(
+            "ALTER TABLE main_doc ADD COLUMN issued_at_ts INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_main_doc_issued_at_ts ON main_doc(issued_at_ts DESC)",
+        [],
+    )?;
+
+    let mut stmt =
+        conn.prepare("SELECT archive_id, issued_at FROM main_doc WHERE issued_at_ts=0")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (archive_id, issued_at) = row?;
+        updates.push((archive_id, parse_issued_at_to_ts(&issued_at).unwrap_or(0)));
+    }
+    for (archive_id, issued_at_ts) in updates {
+        conn.execute(
+            "UPDATE main_doc SET issued_at_ts=? WHERE archive_id=?",
+            rusqlite::params![issued_at_ts, archive_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -361,7 +471,7 @@ pub fn list_archives(
     let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
 
     if req.date_from.is_some() || req.date_to.is_some() {
-        where_sql.push_str(" WHERE a.zip_date BETWEEN ? AND ? ");
+        where_sql.push_str(" WHERE COALESCE(m.issued_at_ts, 0) BETWEEN ? AND ? ");
         params_vec.push(rusqlite::types::Value::from(
             req.date_from.unwrap_or(i64::MIN),
         ));
@@ -375,7 +485,7 @@ pub fn list_archives(
          FROM archives a
          LEFT JOIN main_doc m ON m.archive_id=a.archive_id
          {where_sql}
-         ORDER BY a.imported_at DESC
+         ORDER BY COALESCE(m.issued_at_ts, 0) DESC
          LIMIT ? OFFSET ?"
     );
     params_vec.push(rusqlite::types::Value::from(limit));
@@ -408,8 +518,16 @@ pub fn list_archives(
     }
 
     // 查询所有相关的批注
-    let placeholders = archive_ids.iter().enumerate()
-        .map(|(i, _)| if i == 0 { "?".to_string() } else { format!(", ?") })
+    let placeholders = archive_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            if i == 0 {
+                "?".to_string()
+            } else {
+                format!(", ?")
+            }
+        })
         .collect::<String>();
     let annotation_sql = format!(
         "SELECT annotation_id, archive_id, target_kind, target_ref, locator_json, content, created_at, updated_at
@@ -417,22 +535,26 @@ pub fn list_archives(
          WHERE archive_id IN ({})",
         placeholders
     );
-    let mut annotation_stmt = conn.prepare(&annotation_sql).map_err(|e| err_to_string(anyhow!(e)))?;
-    let annotation_params: Vec<rusqlite::types::Value> =
-        archive_ids.iter().map(|id| rusqlite::types::Value::from(id.clone())).collect();
+    let mut annotation_stmt = conn
+        .prepare(&annotation_sql)
+        .map_err(|e| err_to_string(anyhow!(e)))?;
+    let annotation_params: Vec<rusqlite::types::Value> = archive_ids
+        .iter()
+        .map(|id| rusqlite::types::Value::from(id.clone()))
+        .collect();
     let annotation_rows = annotation_stmt
         .query_map(rusqlite::params_from_iter(annotation_params), |r| {
             let locator_json: String = r.get(4)?;
             let locator = serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
             Ok((
-                r.get::<_, String>(0)?,  // annotation_id
-                r.get::<_, String>(1)?,  // archive_id
-                r.get::<_, String>(2)?,  // target_kind
-                r.get::<_, String>(3)?,  // target_ref
-                locator,                  // locator
-                r.get::<_, String>(5)?,  // content
-                r.get::<_, i64>(6)?,     // created_at
-                r.get::<_, i64>(7)?,     // updated_at
+                r.get::<_, String>(0)?, // annotation_id
+                r.get::<_, String>(1)?, // archive_id
+                r.get::<_, String>(2)?, // target_kind
+                r.get::<_, String>(3)?, // target_ref
+                locator,                // locator
+                r.get::<_, String>(5)?, // content
+                r.get::<_, i64>(6)?,    // created_at
+                r.get::<_, i64>(7)?,    // updated_at
             ))
         })
         .map_err(|e| err_to_string(anyhow!(e)))?;
@@ -441,8 +563,16 @@ pub fn list_archives(
     use std::collections::HashMap;
     let mut annotations_by_archive: HashMap<String, Vec<AnnotationRow>> = HashMap::new();
     for row in annotation_rows {
-        let (annotation_id, archive_id, target_kind, target_ref, locator, content, created_at, updated_at) =
-            row.map_err(|e| err_to_string(anyhow!(e)))?;
+        let (
+            annotation_id,
+            archive_id,
+            target_kind,
+            target_ref,
+            locator,
+            content,
+            created_at,
+            updated_at,
+        ) = row.map_err(|e| err_to_string(anyhow!(e)))?;
         let annotation = AnnotationRow {
             annotation_id,
             target_kind,
@@ -623,7 +753,8 @@ pub fn update_archive_title(
         return Err(format!("档案 {} 没有 main_doc 记录", archive_id));
     }
 
-    tx.commit().map_err(|e| err_to_string(anyhow!(e).context("提交事务失败")))?;
+    tx.commit()
+        .map_err(|e| err_to_string(anyhow!(e).context("提交事务失败")))?;
 
     Ok(())
 }
@@ -836,7 +967,7 @@ pub fn list_topics_by_date(
 
     // 日期范围过滤
     if req.date_from.is_some() || req.date_to.is_some() {
-        where_conditions.push("a.zip_date BETWEEN ? AND ?".to_string());
+        where_conditions.push("COALESCE(m.issued_at_ts, 0) BETWEEN ? AND ?".to_string());
         params.push(rusqlite::types::Value::from(
             req.date_from.unwrap_or(i64::MIN),
         ));
@@ -872,8 +1003,8 @@ pub fn list_topics_by_date(
         "SELECT 
             COALESCE(m.title, '无标题') as title,
             COUNT(*) as archive_count,
-            MAX(a.zip_date) as latest_date,
-            MIN(a.zip_date) as earliest_date
+            MAX(COALESCE(m.issued_at_ts, 0)) as latest_date,
+            MIN(COALESCE(m.issued_at_ts, 0)) as earliest_date
         FROM archives a
         LEFT JOIN main_doc m ON m.archive_id = a.archive_id
         {where_clause}
@@ -912,16 +1043,40 @@ pub fn list_topics_by_date(
 
     // 为每个主题获取对应的档案列表
     for (title, archive_count, latest_date, earliest_date) in topics {
-        let archives_params: Vec<rusqlite::types::Value> =
+        let mut archive_where_conditions = vec!["COALESCE(m.title, '无标题') = ?".to_string()];
+        let mut archives_params: Vec<rusqlite::types::Value> =
             vec![rusqlite::types::Value::from(title.clone())];
+
+        if req.date_from.is_some() || req.date_to.is_some() {
+            archive_where_conditions
+                .push("COALESCE(m.issued_at_ts, 0) BETWEEN ? AND ?".to_string());
+            archives_params.push(rusqlite::types::Value::from(
+                req.date_from.unwrap_or(i64::MIN),
+            ));
+            archives_params.push(rusqlite::types::Value::from(
+                req.date_to.unwrap_or(i64::MAX),
+            ));
+        }
+
+        if let Some(query) = &req.search_query {
+            if !query.trim().is_empty() {
+                archive_where_conditions
+                    .push("(m.title LIKE ? OR m.instruction_no LIKE ?)".to_string());
+                let search_pattern = format!("%{}%", query.trim());
+                archives_params.push(rusqlite::types::Value::from(search_pattern.clone()));
+                archives_params.push(rusqlite::types::Value::from(search_pattern));
+            }
+        }
 
         let archives_sql = format!(
             "SELECT a.archive_id, a.original_name, a.zip_date, a.imported_at, a.status, m.instruction_no, m.title, m.content, m.issued_at
             FROM archives a
             LEFT JOIN main_doc m ON m.archive_id = a.archive_id
-            WHERE COALESCE(m.title, '无标题') = ?
-            ORDER BY a.zip_date DESC
+            WHERE {}
+            ORDER BY COALESCE(m.issued_at_ts, 0) DESC
             LIMIT 50"
+            ,
+            archive_where_conditions.join(" AND ")
         );
 
         let mut archives_stmt = conn

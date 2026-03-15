@@ -1,7 +1,7 @@
 use crate::cache;
 use crate::db;
-use crate::library_root::LibraryRootState;
 use crate::library_root::resolve_library_root;
+use crate::library_root::LibraryRootState;
 use anyhow::{anyhow, Context, Result};
 use calamine::{open_workbook_auto, Data, Reader};
 use encoding_rs::GBK;
@@ -127,8 +127,8 @@ fn get_excel_sheet_info_impl(
             let kind = sniff_kind(path).unwrap_or(FileKind::Unknown);
             match kind {
                 FileKind::Zip => {
-                    let metas = xlsx_list_sheets(path)
-                        .with_context(|| format!("打开Excel失败: {e:#}"))?;
+                    let metas =
+                        xlsx_list_sheets(path).with_context(|| format!("打开Excel失败: {e:#}"))?;
                     if metas.is_empty() {
                         return Err(anyhow!("打开Excel失败: 该xlsx(zip)内未找到可用sheet"));
                     }
@@ -336,7 +336,8 @@ fn load_or_build_fallback(
     let abs = root.join(&rel);
     if abs.exists() {
         let bytes = fs::read(&abs).with_context(|| format!("读取缓存失败: {}", abs.display()))?;
-        let wb: FallbackWorkbook = serde_json::from_slice(&bytes).context("解析excel降级缓存失败")?;
+        let wb: FallbackWorkbook =
+            serde_json::from_slice(&bytes).context("解析excel降级缓存失败")?;
         if !wb.sheets.is_empty() {
             return Ok(wb);
         }
@@ -361,7 +362,9 @@ fn parse_excel_like_as_table(path: &Path) -> Result<FallbackWorkbook> {
         return Err(anyhow!("这是标准 xls（OLE），但解析失败，文件可能损坏"));
     }
     if bytes.starts_with(b"PK\x03\x04") {
-        return Err(anyhow!("这是 xlsx(zip) 文件，已切换到 xlsx(zip) 降级解析路径"));
+        return Err(anyhow!(
+            "这是 xlsx(zip) 文件，已切换到 xlsx(zip) 降级解析路径"
+        ));
     }
 
     let text = decode_text_guess(bytes);
@@ -406,7 +409,12 @@ fn parse_delimited_table(text: &str) -> Result<FallbackSheet> {
         return Err(anyhow!("文件内容为空，无法预览"));
     }
 
-    let sample = lines.iter().take(40).map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+    let sample = lines
+        .iter()
+        .take(40)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let tab = sample.matches('\t').count();
     let comma = sample.matches(',').count();
     let semi = sample.matches(';').count();
@@ -485,10 +493,9 @@ fn xlsx_list_sheets(path: &Path) -> Result<Vec<XlsxSheetMeta>> {
     let f = fs::File::open(path).with_context(|| format!("打开文件失败: {}", path.display()))?;
     let mut zip = ZipArchive::new(f).context("打开xlsx(zip)失败")?;
 
-    let workbook_xml = read_zip_text(&mut zip, "xl/workbook.xml")
-        .context("xlsx缺少 xl/workbook.xml")?;
-    let rels_xml = read_zip_text(&mut zip, "xl/_rels/workbook.xml.rels")
-        .unwrap_or_default();
+    let workbook_xml =
+        read_zip_text(&mut zip, "xl/workbook.xml").context("xlsx缺少 xl/workbook.xml")?;
+    let rels_xml = read_zip_text(&mut zip, "xl/_rels/workbook.xml.rels").unwrap_or_default();
 
     let rels = parse_rels_map(&rels_xml);
     let sheets = parse_workbook_sheets(&workbook_xml, &rels)?;
@@ -520,8 +527,8 @@ fn xlsx_read_cells_window(
     let f = fs::File::open(path).with_context(|| format!("打开文件失败: {}", path.display()))?;
     let mut zip = ZipArchive::new(f).context("打开xlsx(zip)失败")?;
 
-    let workbook_xml = read_zip_text(&mut zip, "xl/workbook.xml")
-        .context("xlsx缺少 xl/workbook.xml")?;
+    let workbook_xml =
+        read_zip_text(&mut zip, "xl/workbook.xml").context("xlsx缺少 xl/workbook.xml")?;
     let rels_xml = read_zip_text(&mut zip, "xl/_rels/workbook.xml.rels").unwrap_or_default();
     let rels = parse_rels_map(&rels_xml);
     let sheets = parse_workbook_sheets(&workbook_xml, &rels)?;
@@ -666,7 +673,9 @@ fn parse_sheet_cells_window(
         let rcap = re_attr_r.captures(attrs);
         let Some(rcap) = rcap else { continue };
         let r = rcap.get(1).unwrap().as_str();
-        let Some((rr, cc)) = parse_cell_ref(r) else { continue };
+        let Some((rr, cc)) = parse_cell_ref(r) else {
+            continue;
+        };
         if rr < row_start || rr >= row_end || cc < col_start || cc >= col_end {
             continue;
         }

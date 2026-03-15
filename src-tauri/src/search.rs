@@ -78,6 +78,11 @@ pub enum SearchResult {
     },
 }
 
+#[derive(Debug, Clone)]
+struct ArchiveSortKey {
+    issued_at_ts: i64,
+}
+
 pub fn build_search_text(text: &str) -> String {
     let t = text.trim();
     if t.is_empty() {
@@ -204,24 +209,51 @@ fn search_paged_impl(
     let fetch = (need.saturating_mul(4)).min(5000).max(200);
 
     let mut results_docx = query_docx_blocks(&conn, &match_query, fetch, &allowed_archives_set)?;
-    let mut results_field = query_main_doc_fields(&conn, &match_query, fetch, &allowed_archives_set)?;
-    let mut results_attach =
-        query_attachment_names(&conn, &match_query, fetch, &allowed_archives_set, &want_types)?;
-    let mut results_anno = query_annotations(&conn, &match_query, fetch, &allowed_archives_set, &want_types)?;
+    let mut results_field =
+        query_main_doc_fields(&conn, &match_query, fetch, &allowed_archives_set)?;
+    let mut results_attach = query_attachment_names(
+        &conn,
+        &match_query,
+        fetch,
+        &allowed_archives_set,
+        &want_types,
+    )?;
+    let mut results_anno = query_annotations(
+        &conn,
+        &match_query,
+        fetch,
+        &allowed_archives_set,
+        &want_types,
+    )?;
 
     // 计算 highlights
     for r in results_docx.iter_mut() {
-        if let SearchResult::DocxBlock { block_text, highlights, .. } = r {
+        if let SearchResult::DocxBlock {
+            block_text,
+            highlights,
+            ..
+        } = r
+        {
             *highlights = compute_highlights_utf16(block_text, &req.query);
         }
     }
     for r in results_attach.iter_mut() {
-        if let SearchResult::AttachmentName { display_name, highlights, .. } = r {
+        if let SearchResult::AttachmentName {
+            display_name,
+            highlights,
+            ..
+        } = r
+        {
             *highlights = compute_highlights_utf16(display_name, &req.query);
         }
     }
     for r in results_anno.iter_mut() {
-        if let SearchResult::Annotation { content, highlights, .. } = r {
+        if let SearchResult::Annotation {
+            content,
+            highlights,
+            ..
+        } = r
+        {
             *highlights = compute_highlights_utf16(content, &req.query);
         }
     }
@@ -237,7 +269,11 @@ fn search_paged_impl(
             let content_ids = v
                 .get("content")
                 .and_then(|c| c.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
             if !content_ids.is_empty() {
                 content_block_map.insert(archive_id, content_ids);
@@ -248,7 +284,12 @@ fn search_paged_impl(
     // 收集 docx 命中的 (archive_id, block_id) 用于 content 去重
     let mut docx_hit_blocks: HashSet<(String, String)> = HashSet::new();
     for r in &results_docx {
-        if let SearchResult::DocxBlock { archive_id, block_id, .. } = r {
+        if let SearchResult::DocxBlock {
+            archive_id,
+            block_id,
+            ..
+        } = r
+        {
             docx_hit_blocks.insert((archive_id.clone(), block_id.clone()));
         }
     }
@@ -295,7 +336,8 @@ fn search_paged_impl(
                         pick_best_content_block(&conn, archive_id, content_ids, &query_tokens)?
                     {
                         *best_block_id = Some(best_id.clone());
-                        *best_block_highlights = Some(compute_highlights_utf16(&best_text, &req.query));
+                        *best_block_highlights =
+                            Some(compute_highlights_utf16(&best_text, &req.query));
                     } else if let Some(first) = content_ids.first() {
                         *best_block_id = Some(first.clone());
                     }
@@ -320,8 +362,25 @@ fn search_paged_impl(
     out.extend(results_anno);
     out.extend(results_attach);
 
-    // 简单排序：按 kind + 命中长度（highlights 覆盖总长度）
+    let archive_sort_keys = load_archive_sort_keys(&conn)?;
+
+    // 先按下发时间倒序，再在同一档案内按结果类型和高亮强度稳定排序。
     out.sort_by(|a, b| {
+        let sa = archive_sort_keys
+            .get(result_archive_id(a))
+            .cloned()
+            .unwrap_or(ArchiveSortKey {
+                issued_at_ts: i64::MIN,
+            });
+        let sb = archive_sort_keys
+            .get(result_archive_id(b))
+            .cloned()
+            .unwrap_or(ArchiveSortKey {
+                issued_at_ts: i64::MIN,
+            });
+        if sa.issued_at_ts != sb.issued_at_ts {
+            return sb.issued_at_ts.cmp(&sa.issued_at_ts);
+        }
         let ka = kind_rank(a);
         let kb = kind_rank(b);
         if ka != kb {
@@ -341,14 +400,11 @@ fn search_paged_impl(
         let sa = highlight_score(a);
         let sb = highlight_score(b);
         sb.cmp(&sa)
+            .then_with(|| result_archive_id(a).cmp(result_archive_id(b)))
     });
 
     let has_more = out.len() > offset.saturating_add(limit);
-    let items = out
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect::<Vec<_>>();
+    let items = out.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
 
     Ok(SearchPagedResponse {
         items,
@@ -364,6 +420,15 @@ fn kind_rank(r: &SearchResult) -> i32 {
         SearchResult::MainDocField { .. } => 1,
         SearchResult::Annotation { .. } => 2,
         SearchResult::AttachmentName { .. } => 3,
+    }
+}
+
+fn result_archive_id(r: &SearchResult) -> &str {
+    match r {
+        SearchResult::DocxBlock { archive_id, .. } => archive_id,
+        SearchResult::MainDocField { archive_id, .. } => archive_id,
+        SearchResult::AttachmentName { archive_id, .. } => archive_id,
+        SearchResult::Annotation { archive_id, .. } => archive_id,
     }
 }
 
@@ -387,13 +452,38 @@ fn field_rank(field_name: &str) -> i32 {
     }
 }
 
-fn filter_archives_by_date(conn: &Connection, from: Option<i64>, to: Option<i64>) -> Result<Vec<String>> {
+fn load_archive_sort_keys(conn: &Connection) -> Result<HashMap<String, ArchiveSortKey>> {
+    let mut stmt = conn.prepare("SELECT archive_id, COALESCE(issued_at_ts, 0) FROM main_doc")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            ArchiveSortKey {
+                issued_at_ts: r.get(1)?,
+            },
+        ))
+    })?;
+
+    let mut out = HashMap::new();
+    for row in rows {
+        let (archive_id, sort_key) = row?;
+        out.insert(archive_id, sort_key);
+    }
+    Ok(out)
+}
+
+fn filter_archives_by_date(
+    conn: &Connection,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Result<Vec<String>> {
     if from.is_none() && to.is_none() {
         return Ok(vec![]);
     }
     let from_v = from.unwrap_or(i64::MIN);
     let to_v = to.unwrap_or(i64::MAX);
-    let mut stmt = conn.prepare("SELECT archive_id FROM archives WHERE zip_date BETWEEN ? AND ?")?;
+    let mut stmt = conn.prepare(
+        "SELECT archive_id FROM main_doc WHERE COALESCE(issued_at_ts, 0) BETWEEN ? AND ?",
+    )?;
     let rows = stmt.query_map(params![from_v, to_v], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for row in rows {
@@ -409,7 +499,12 @@ fn query_docx_blocks(
     allowed_archives: &Option<HashSet<String>>,
 ) -> Result<Vec<SearchResult>> {
     let mut out = Vec::new();
-    let sql = "SELECT archive_id, block_id, source_text FROM docx_blocks_fts WHERE docx_blocks_fts MATCH ? LIMIT ?";
+    let sql = "SELECT docx_blocks_fts.archive_id, docx_blocks_fts.block_id, docx_blocks_fts.source_text
+        FROM docx_blocks_fts
+        JOIN main_doc m ON m.archive_id = docx_blocks_fts.archive_id
+        WHERE docx_blocks_fts MATCH ?
+        ORDER BY COALESCE(m.issued_at_ts, 0) DESC, docx_blocks_fts.archive_id ASC, docx_blocks_fts.block_id ASC
+        LIMIT ?";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![match_query, limit as i64], |r| {
         Ok((
@@ -445,7 +540,12 @@ fn query_main_doc_fields(
     allowed_archives: &Option<HashSet<String>>,
 ) -> Result<Vec<SearchResult>> {
     let mut out = Vec::new();
-    let sql = "SELECT archive_id, field_name, source_text FROM main_doc_fts WHERE main_doc_fts MATCH ? LIMIT ?";
+    let sql = "SELECT main_doc_fts.archive_id, main_doc_fts.field_name, main_doc_fts.source_text
+        FROM main_doc_fts
+        JOIN main_doc m ON m.archive_id = main_doc_fts.archive_id
+        WHERE main_doc_fts MATCH ?
+        ORDER BY COALESCE(m.issued_at_ts, 0) DESC, main_doc_fts.archive_id ASC
+        LIMIT ?";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![match_query, limit as i64], |r| {
         Ok((
@@ -489,17 +589,18 @@ fn query_attachment_names(
     let mut type_clause = String::new();
     let mut type_params: Vec<String> = Vec::new();
     if let Some(want) = want_types {
-        let attachment_types: Vec<String> = want
-            .iter()
-            .filter(|t| *t != "docx_main")
-            .cloned()
-            .collect();
+        let attachment_types: Vec<String> =
+            want.iter().filter(|t| *t != "docx_main").cloned().collect();
         if attachment_types.is_empty() {
             return Ok(vec![]);
         }
         type_clause = format!(
             " AND a.file_type IN ({})",
-            attachment_types.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+            attachment_types
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",")
         );
         type_params = attachment_types;
     }
@@ -522,7 +623,9 @@ fn query_attachment_names(
         "SELECT a.archive_id, a.file_id, attachments_fts.display_name
          FROM attachments_fts
          JOIN attachments a ON a.file_id=attachments_fts.file_id
+         JOIN main_doc m ON m.archive_id=a.archive_id
          WHERE attachments_fts MATCH ? {type_clause} {archive_clause}
+         ORDER BY COALESCE(m.issued_at_ts, 0) DESC, a.archive_id ASC, a.file_id ASC
          LIMIT ?"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -589,7 +692,9 @@ fn query_annotations(
         "SELECT a.archive_id, a.annotation_id, a.target_kind, a.target_ref, a.locator_json, a.content
          FROM annotations_fts
          JOIN annotations a ON a.annotation_id=annotations_fts.annotation_id
+         JOIN main_doc m ON m.archive_id=a.archive_id
          WHERE annotations_fts MATCH ? {archive_clause}
+         ORDER BY COALESCE(m.issued_at_ts, 0) DESC, a.archive_id ASC, a.annotation_id ASC
          LIMIT ?"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -654,7 +759,10 @@ fn compute_highlights_utf16(text: &str, query: &str) -> Vec<Range> {
     for n in needles {
         for (byte_start, _) in text.match_indices(&n) {
             let byte_end = byte_start + n.len();
-            if let (Some(us), Some(ue)) = (byte_to_utf16(text, byte_start), byte_to_utf16(text, byte_end)) {
+            if let (Some(us), Some(ue)) = (
+                byte_to_utf16(text, byte_start),
+                byte_to_utf16(text, byte_end),
+            ) {
                 if us < ue {
                     ranges.push(Range { start: us, end: ue });
                 }
@@ -721,10 +829,13 @@ fn pick_best_content_block(
     }
     // 读取这些段落文本
     let mut texts: Vec<(String, String)> = Vec::new();
-    let mut stmt = conn.prepare("SELECT block_id,text FROM docx_blocks WHERE archive_id=? AND block_id=?")?;
+    let mut stmt =
+        conn.prepare("SELECT block_id,text FROM docx_blocks WHERE archive_id=? AND block_id=?")?;
     for bid in content_block_ids {
         if let Some((block_id, text)) = stmt
-            .query_row(params![archive_id, bid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_row(params![archive_id, bid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .optional()?
         {
             texts.push((block_id, text));

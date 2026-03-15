@@ -149,8 +149,14 @@ fn delete_annotation_impl(
     let root = resolve_library_root(app, state)?;
     db::init_db(app, &root)?;
     let conn = Connection::open(root.join("db.sqlite"))?;
-    conn.execute("DELETE FROM annotations WHERE annotation_id=?", [annotation_id])?;
-    conn.execute("DELETE FROM annotations_fts WHERE annotation_id=?", [annotation_id])?;
+    conn.execute(
+        "DELETE FROM annotations WHERE annotation_id=?",
+        [annotation_id],
+    )?;
+    conn.execute(
+        "DELETE FROM annotations_fts WHERE annotation_id=?",
+        [annotation_id],
+    )?;
     Ok(())
 }
 
@@ -198,7 +204,8 @@ fn update_annotation_impl(
         [&search_text, &req.content, &req.annotation_id],
     )?;
 
-    let locator: serde_json::Value = serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
+    let locator: serde_json::Value =
+        serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
     Ok(AnnotationResp {
         annotation_id: req.annotation_id,
         archive_id,
@@ -251,7 +258,9 @@ fn create_or_update_annotation_impl(
 
     let now = chrono::Utc::now().timestamp();
 
-    if let Some((annotation_id, archive_id, target_kind, target_ref, locator_json, created_at)) = existing {
+    if let Some((annotation_id, archive_id, target_kind, target_ref, locator_json, created_at)) =
+        existing
+    {
         // 更新现有批注
         conn.execute(
             "UPDATE annotations SET content=?, updated_at=? WHERE annotation_id=?",
@@ -265,7 +274,8 @@ fn create_or_update_annotation_impl(
             [&search_text, &req.content, &annotation_id],
         )?;
 
-        let locator: serde_json::Value = serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
+        let locator: serde_json::Value =
+            serde_json::from_str(&locator_json).unwrap_or(serde_json::json!({}));
         Ok(AnnotationResp {
             annotation_id,
             archive_id,

@@ -66,7 +66,8 @@ fn collect_zip_files(dir: &Path, out: &mut Vec<String>, limit: usize) -> Result<
     if out.len() >= limit {
         return Ok(());
     }
-    for entry in fs::read_dir(dir).with_context(|| format!("读取目录失败: {}", dir.display()))? {
+    for entry in fs::read_dir(dir).with_context(|| format!("读取目录失败: {}", dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
@@ -121,7 +122,10 @@ fn emit_import_progress(
     let current = zip_idx
         .saturating_mul(IMPORT_STEPS_PER_ZIP)
         .saturating_add(local_step.min(IMPORT_STEPS_PER_ZIP.saturating_sub(1)));
-    progress::emit(app, progress::ProgressEvent::new("import", current, total, step, message));
+    progress::emit(
+        app,
+        progress::ProgressEvent::new("import", current, total, step, message),
+    );
 }
 
 fn import_zips_impl(
@@ -138,7 +142,10 @@ fn import_zips_impl(
     let mut archives = Vec::new();
 
     let total = paths.len();
-    progress::emit(app, progress::ProgressEvent::new("import", 0, total.max(1), "开始", "准备导入ZIP"));
+    progress::emit(
+        app,
+        progress::ProgressEvent::new("import", 0, total.max(1), "开始", "准备导入ZIP"),
+    );
 
     for (idx, p) in paths.into_iter().enumerate() {
         emit_import_progress(app, idx, total, 0, "处理ZIP", &format!("正在处理: {}", p));
@@ -151,11 +158,25 @@ fn import_zips_impl(
                 // 若是重复跳过
                 if e.to_string().contains("__SKIP__") {
                     skipped += 1;
-                    emit_import_progress(app, idx, total, IMPORT_STEPS_PER_ZIP - 1, "跳过", "指纹已存在，跳过该ZIP");
+                    emit_import_progress(
+                        app,
+                        idx,
+                        total,
+                        IMPORT_STEPS_PER_ZIP - 1,
+                        "跳过",
+                        "指纹已存在，跳过该ZIP",
+                    );
                     continue;
                 }
                 failed += 1;
-                emit_import_progress(app, idx, total, IMPORT_STEPS_PER_ZIP - 1, "失败", "导入失败（已记录错误）");
+                emit_import_progress(
+                    app,
+                    idx,
+                    total,
+                    IMPORT_STEPS_PER_ZIP - 1,
+                    "失败",
+                    "导入失败（已记录错误）",
+                );
                 eprintln!("导入失败: {p}: {e:#}");
             }
         }
@@ -233,14 +254,16 @@ fn reparse_main_doc_impl(
         progress::ProgressEvent::new("reparse", 2, 3, "写入数据库", "更新主文与索引"),
     );
     let tx = conn.transaction()?;
+    let issued_at_ts = db::parse_issued_at_to_ts(&parsed.issued_at).unwrap_or(0);
 
     // main_doc upsert
     let changed = tx.execute(
-        "UPDATE main_doc SET instruction_no=?, title=?, issued_at=?, content=?, field_block_map_json=? WHERE archive_id=?",
+        "UPDATE main_doc SET instruction_no=?, title=?, issued_at=?, issued_at_ts=?, content=?, field_block_map_json=? WHERE archive_id=?",
         params![
             parsed.instruction_no,
             parsed.title,
             parsed.issued_at,
+            issued_at_ts,
             parsed.content,
             parsed.field_block_map_json,
             archive_id
@@ -248,12 +271,13 @@ fn reparse_main_doc_impl(
     )?;
     if changed == 0 {
         tx.execute(
-            "INSERT INTO main_doc(archive_id,instruction_no,title,issued_at,content,field_block_map_json) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO main_doc(archive_id,instruction_no,title,issued_at,issued_at_ts,content,field_block_map_json) VALUES(?,?,?,?,?,?,?)",
             params![
                 archive_id,
                 parsed.instruction_no,
                 parsed.title,
                 parsed.issued_at,
+                issued_at_ts,
                 parsed.content,
                 parsed.field_block_map_json
             ],
@@ -262,11 +286,15 @@ fn reparse_main_doc_impl(
 
     // 重建 blocks 与 FTS（避免旧数据污染）
     tx.execute("DELETE FROM docx_blocks WHERE archive_id=?", [archive_id])?;
-    tx.execute("DELETE FROM docx_blocks_fts WHERE archive_id=?", [archive_id])?;
+    tx.execute(
+        "DELETE FROM docx_blocks_fts WHERE archive_id=?",
+        [archive_id],
+    )?;
     tx.execute("DELETE FROM main_doc_fts WHERE archive_id=?", [archive_id])?;
 
     {
-        let mut stmt = tx.prepare("INSERT INTO docx_blocks(archive_id,block_id,text) VALUES(?,?,?)")?;
+        let mut stmt =
+            tx.prepare("INSERT INTO docx_blocks(archive_id,block_id,text) VALUES(?,?,?)")?;
         for b in &parsed.blocks {
             stmt.execute(params![archive_id, b.block_id, b.text])?;
         }
@@ -302,7 +330,10 @@ fn reparse_main_doc_impl(
     )?;
     tx.commit()?;
 
-    progress::emit(app, progress::ProgressEvent::complete("reparse", "重新解析完成"));
+    progress::emit(
+        app,
+        progress::ProgressEvent::complete("reparse", "重新解析完成"),
+    );
     Ok("重新解析完成".to_string())
 }
 
@@ -329,10 +360,7 @@ fn parse_zip_date_from_name(name: &str, imported_at: i64) -> i64 {
             let d = s[6..8].parse::<u32>().ok()?;
             return NaiveDate::from_ymd_opt(y, m, d);
         }
-        if s.len() == 10
-            && s.chars().nth(4) == Some('-')
-            && s.chars().nth(7) == Some('-')
-        {
+        if s.len() == 10 && s.chars().nth(4) == Some('-') && s.chars().nth(7) == Some('-') {
             let y = s[0..4].parse::<i32>().ok()?;
             let m = s[5..7].parse::<u32>().ok()?;
             let d = s[8..10].parse::<u32>().ok()?;
@@ -385,7 +413,8 @@ fn import_one_zip(
         }
         source_path.to_path_buf()
     } else {
-        source_path.canonicalize()
+        source_path
+            .canonicalize()
             .with_context(|| format!("无法规范化路径: {}", source_path.display()))?
     };
 
@@ -463,17 +492,19 @@ fn import_one_zip(
 
         emit_import_progress(app, zip_idx, zip_total, 4, "解析主docx", "抽取字段与段落");
         let parsed = docx::parse_main_docx(&main_docx_bytes)?;
+        let issued_at_ts = db::parse_issued_at_to_ts(&parsed.issued_at).unwrap_or(0);
 
         // 写 main_doc + blocks + FTS + attachments 采用一个事务，避免中途失败留下半数据
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO main_doc(archive_id,instruction_no,title,issued_at,content,field_block_map_json)
-             VALUES(?,?,?,?,?,?)",
+            "INSERT INTO main_doc(archive_id,instruction_no,title,issued_at,issued_at_ts,content,field_block_map_json)
+             VALUES(?,?,?,?,?,?,?)",
             params![
                 archive_id,
                 parsed.instruction_no,
                 parsed.title,
                 parsed.issued_at,
+                issued_at_ts,
                 parsed.content,
                 parsed.field_block_map_json
             ],
@@ -546,7 +577,10 @@ fn import_one_zip(
     }
 }
 
-fn identify_main_docx<R: Read + Seek>(zip_filename: &str, zip: &mut ZipArchive<R>) -> Result<String> {
+fn identify_main_docx<R: Read + Seek>(
+    zip_filename: &str,
+    zip: &mut ZipArchive<R>,
+) -> Result<String> {
     let mut docx_entries = Vec::new(); // (internal_name, decoded_name)
     for i in 0..zip.len() {
         let f = zip.by_index(i)?;
@@ -591,7 +625,10 @@ fn identify_main_docx<R: Read + Seek>(zip_filename: &str, zip: &mut ZipArchive<R
     Ok(docx_entries[0].0.clone())
 }
 
-fn read_zip_entry_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, entry_name: &str) -> Result<Vec<u8>> {
+fn read_zip_entry_bytes<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    entry_name: &str,
+) -> Result<Vec<u8>> {
     // by_name 可能失败，增加扫描兜底
     if let Ok(mut f) = zip.by_name(entry_name) {
         let mut buf = Vec::new();
@@ -636,7 +673,11 @@ fn file_type_from_name(name: &str) -> String {
     {
         return "image".to_string();
     }
-    if lower.ends_with(".mp4") || lower.ends_with(".mov") || lower.ends_with(".avi") || lower.ends_with(".wmv") {
+    if lower.ends_with(".mp4")
+        || lower.ends_with(".mov")
+        || lower.ends_with(".avi")
+        || lower.ends_with(".wmv")
+    {
         return "video".to_string();
     }
     if lower.ends_with(".docx") {
@@ -653,7 +694,12 @@ fn basename(path: &str) -> String {
     p.split('/').last().unwrap_or(&p).to_string()
 }
 
-fn stable_file_id(archive_id: &str, source_depth: i64, container_virtual_path: &Option<String>, virtual_path: &str) -> String {
+fn stable_file_id(
+    archive_id: &str,
+    source_depth: i64,
+    container_virtual_path: &Option<String>,
+    virtual_path: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(archive_id.as_bytes());
     hasher.update(b"|");
@@ -783,7 +829,12 @@ fn write_attachments_tx(
 ) -> Result<()> {
     // 修复占位 file_id（需要 archive_id）
     for a in attachments.iter_mut() {
-        a.file_id = stable_file_id(archive_id, a.source_depth, &a.container_virtual_path, &a.virtual_path);
+        a.file_id = stable_file_id(
+            archive_id,
+            a.source_depth,
+            &a.container_virtual_path,
+            &a.virtual_path,
+        );
     }
 
     {

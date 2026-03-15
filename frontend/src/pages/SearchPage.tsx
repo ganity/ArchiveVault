@@ -944,15 +944,24 @@ function renderTypeToggle(
 }
 
 function toTsStart(date: string): number | null {
-  if (!date) return null;
-  const d = new Date(`${date}T00:00:00+08:00`);
+  const d = parseLocalDate(date, false);
+  if (!d) return null;
   return Math.floor(d.getTime() / 1000);
 }
 
 function toTsEnd(date: string): number | null {
-  if (!date) return null;
-  const d = new Date(`${date}T23:59:59+08:00`);
+  const d = parseLocalDate(date, true);
+  if (!d) return null;
   return Math.floor(d.getTime() / 1000);
+}
+
+function parseLocalDate(date: string, endOfDay: boolean): Date | null {
+  if (!date) return null;
+  const [year, month, day] = date.split("-").map(Number);
+  if (![year, month, day].every(Number.isFinite)) return null;
+  return endOfDay
+    ? new Date(year, month - 1, day, 23, 59, 59, 999)
+    : new Date(year, month - 1, day, 0, 0, 0, 0);
 }
 
 function blockOrder(blockId: string): number {
